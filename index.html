@@ -118,6 +118,10 @@
   #calibProgress{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);color:var(--muted);font-size:13px;display:none;text-align:center;width:min(92vw,640px)}
   #calibMic{display:none;color:#6c7389;margin-left:8px}
   #calibMic.loud{color:var(--good)}
+  #micMeter{display:inline-block;width:70px;height:6px;border-radius:3px;background:#262a36;vertical-align:middle;margin-left:6px;position:relative;overflow:hidden}
+  #micMeter::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#6c7389}
+  #micBar{display:block;height:100%;width:0;background:var(--accent)}
+  #calibMic.loud #micBar{background:var(--good)}
   #calibHeard{margin-top:4px;min-height:1.2em;color:#aab0c0}
 </style>
 </head>
@@ -246,7 +250,7 @@
   </div>
   <div id="cdot"></div>
   <div id="cword"></div>
-  <div id="calibProgress"><span id="calibStep"></span> <span id="calibMic" title="listening">● listening</span><div id="calibHeard"></div></div>
+  <div id="calibProgress"><span id="calibStep"></span> <span id="calibMic" title="listening">● listening <span id="micMeter"><span id="micBar"></span></span></span><div id="calibHeard"></div></div>
 </div>
 
 <script type="module">
@@ -947,14 +951,34 @@ function makeSpeechConfirmer(lang) {
   };
   return api;
 }
+// Voice-activity detector fed with the mic level (RMS) every 20 ms.
+// The noise floor follows the room: down quickly, up slowly, so steady background noise is learned
+// within about a second while a spoken word still stands out.
+/*VAD-START*/
+function makeVAD() {
+  let floor = null, loudRun = 0, quietRun = 0;
+  return {
+    step(rms) {
+      if (floor === null) floor = rms;
+      const th = Math.max(0.0035, floor * 2.2);
+      const loud = rms > th;
+      if (rms < floor) floor += 0.15 * (rms - floor);
+      else floor += (loud ? 0.004 : 0.03) * (rms - floor);
+      if (loud) { loudRun++; quietRun = 0; } else { loudRun = 0; quietRun++; }
+      return { loud, loudRun, quietRun, th, floor };
+    },
+  };
+}
+/*VAD-END*/
 function makeVoiceConfirmer() {
   // Local voice-activity detection: only the timing of your voice is used, nothing is recorded or sent.
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  let stream, an, buf, timer, floor = 0.004, loudRun = 0, quietRun = 0, waiting = null;
+  let stream, an, buf, timer, waiting = null;
+  const vad = makeVAD();
   return {
     where: "this device",
     async init() {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       const src = ctx.createMediaStreamSource(stream);
       an = ctx.createAnalyser(); an.fftSize = 1024; buf = new Float32Array(an.fftSize); src.connect(an);
       if (ctx.state === "suspended") await ctx.resume();
@@ -962,12 +986,11 @@ function makeVoiceConfirmer() {
         an.getFloatTimeDomainData(buf);
         let sq = 0; for (let i = 0; i < buf.length; i++) sq += buf[i] * buf[i];
         const rms = Math.sqrt(sq / buf.length);
-        const loud = rms > Math.max(0.012, floor * 4);
-        if (loud) { loudRun++; quietRun = 0; } else { loudRun = 0; quietRun++; floor += 0.05 * (rms - floor); }
-        setListening(true, loud);
+        const v = vad.step(rms);
+        setListening(true, v.loud, rms / v.th);
         if (!waiting || !waiting.t0) return;
-        if (!waiting.armed && quietRun >= 6) waiting.armed = true;             // silent once the word appeared
-        if (waiting.armed && loudRun >= 3 && performance.now() - waiting.t0 > 250) { // ~60 ms of voice
+        if (!waiting.armed && v.quietRun >= 5) waiting.armed = true;             // silent for 0.1 s after the word appeared
+        if (waiting.armed && v.loudRun >= 3 && performance.now() - waiting.t0 > 250) { // ~60 ms of voice
           const w = waiting; waiting = null; w.res({ t: performance.now() - 60 });
         }
       }, 20);
@@ -1017,9 +1040,10 @@ function showHeard(txt, ok) {
   const el = $("#calibHeard"); if (!el) return;
   el.textContent = txt ? `heard: “${txt}”` : ""; el.style.color = ok ? "var(--good)" : "";
 }
-function setListening(on, loud) {
+function setListening(on, loud, level) {
   const el = $("#calibMic"); if (!el) return;
   el.style.display = on ? "inline-block" : "none"; el.classList.toggle("loud", !!loud);
+  if (level != null) $("#micBar").style.width = Math.min(100, level * 50) + "%"; // the bar's midpoint is the "voice" threshold
 }
 
 function calibPoints(n) {
@@ -1109,7 +1133,7 @@ function robustTrain(samples, nGroups) {
 
 const MODE_TEXT = {
   speech: "Each dot turns into a word. Read it out loud: a point only counts once the word is recognised. Speech recognition is Chrome's own; on Android it sends each word's audio to Google. Pick “Voice detection” in Stats to keep everything on the device.",
-  voice: "Each dot turns into a word. Say it out loud as soon as you've read it. Only the timing of your voice is used: nothing is recorded or sent anywhere.",
+  voice: "Each dot turns into a word. Say it out loud as soon as you've read it. Only the timing of your voice is used: nothing is recorded or sent anywhere. The bar at the bottom shows your mic level; it turns green when it hears you.",
   tap: "Each dot turns into a word. Press Space (or tap the screen) the moment you've read it.",
   dots: "Look straight at each dot until it shrinks and moves on. Try to keep your head still.",
 };
