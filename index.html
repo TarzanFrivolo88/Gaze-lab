@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gaze Lab — webcam eye tracker</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#151821; --line:#262a36; --text:#e6e8ee; --muted:#8a90a2;
+    --accent:#6ea8ff; --good:#4cc38a; --warn:#e6b450; --bad:#e5604f;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       overflow:hidden;display:grid;grid-template-rows:auto 1fr;grid-template-columns:1fr 300px}
+  header{grid-column:1/3;display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:15px;margin:0 10px 0 0;letter-spacing:.02em}
+  header h1 span{color:var(--accent)}
+  .tabs{display:flex;background:#0c0e13;border:1px solid var(--line);border-radius:8px;padding:2px}
+  .tabs button{border:0;background:transparent;color:var(--muted);padding:5px 12px;border-radius:6px;cursor:pointer;font:inherit}
+  .tabs button.on{background:#232838;color:var(--text)}
+  .spacer{flex:1}
+  button.btn{background:#232838;border:1px solid #30364a;color:var(--text);padding:6px 12px;border-radius:7px;cursor:pointer;font:inherit}
+  button.btn:hover{background:#2b3145}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#0b1020;font-weight:600}
+  button.btn:disabled{opacity:.45;cursor:default}
+  .primary kbd{color:#0b1020;border-color:rgba(11,16,32,.35)}
+  kbd{font:11px ui-monospace,monospace;color:var(--muted);border:1px solid #39405a;border-radius:4px;padding:0 4px;margin-left:4px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;background:#1d2130;color:var(--muted);font-size:12px}
+  .pill i{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+  .pill.ok i{background:var(--good)} .pill.warn i{background:var(--warn)} .pill.bad i{background:var(--bad)}
+  .chip{font-size:12px;padding:3px 9px;border-radius:6px;background:#3a2e14;color:var(--warn);display:none}
+
+  main{position:relative;overflow:hidden}
+  aside{border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:12px 14px 20px}
+  aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:16px 0 6px}
+  aside h3:first-child{margin-top:0}
+  .kv{display:grid;grid-template-columns:1fr auto;gap:3px 10px;font-variant-numeric:tabular-nums}
+  .kv span:nth-child(odd){color:var(--muted)}
+  .big{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .muted{color:var(--muted)}
+  .small{font-size:12px}
+  label.opt{display:flex;align-items:center;gap:8px;margin:5px 0;color:var(--text)}
+  select,input[type=range]{accent-color:var(--accent)}
+  select{background:#0c0e13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 6px;font:inherit}
+  #preview{width:100%;max-height:240px;object-fit:contain;background:#000;border-radius:8px;display:block}
+  #timeline{width:100%;height:46px;background:#0c0e13;border-radius:6px;display:block}
+  .legend{display:flex;gap:10px;font-size:11px;color:var(--muted);margin-top:4px}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+
+  /* free gaze view */
+  #freeView{position:absolute;inset:0;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr)}
+  .cell{border:1px dashed #232838;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#3d4458;transition:background .15s}
+  .cell b{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums}
+  .cell.active{background:rgba(110,168,255,.10);color:var(--accent)}
+
+  /* reading view */
+  #readView{position:absolute;inset:0;display:none}
+  #readScroll{position:absolute;inset:0;overflow:auto;padding:34px 70px 120px}
+  #readBar{max-width:800px;margin:0 auto 18px;display:flex;gap:8px;align-items:center}
+  article{max-width:800px;margin:0 auto;font:22px/2.25 Georgia,"Times New Roman",serif;color:#e7e2d6;position:relative;z-index:2}
+  article p{margin:0 0 1.1em}
+  article h2{font:600 15px/1.4 system-ui,sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px}
+  #lineHL{position:fixed;background:rgba(110,168,255,.13);border-radius:6px;pointer-events:none;z-index:1;display:none;transition:top .12s,height .12s}
+  #lineMarks{position:fixed;inset:0;pointer-events:none;z-index:1}
+  #lineMarks div{position:fixed;width:6px;border-radius:3px;background:rgba(76,195,138,.55)}
+  #pasteBox{display:none;max-width:800px;margin:0 auto 18px}
+  #pasteBox textarea{width:100%;height:180px;background:#0c0e13;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:14px/1.5 system-ui}
+
+  /* gaze + heat */
+  #heat{position:fixed;inset:0;pointer-events:none;z-index:5;opacity:.6;display:none}
+  #dot{position:fixed;left:0;top:0;width:30px;height:30px;margin:-15px 0 0 -15px;border:2px solid rgba(255,120,90,.85);border-radius:50%;
+       pointer-events:none;z-index:50;display:none;box-shadow:0 0 12px rgba(255,120,90,.35)}
+  #dot::after{content:"";position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px;border-radius:50%;background:rgba(255,120,90,.95)}
+
+  /* overlays */
+  .overlay{position:fixed;inset:0;z-index:100;background:rgba(8,10,14,.97);display:none;align-items:center;justify-content:center}
+  .overlay.show{display:flex}
+  .card{max-width:620px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 28px}
+  .card h2{margin:0 0 8px;font-size:22px}
+  .card ul{padding-left:18px;margin:10px 0}
+  .card li{margin:4px 0}
+  .err{color:var(--bad);margin-top:12px;white-space:pre-wrap}
+  #calibMsg{text-align:center;max-width:520px}
+  #calibMsg h2{margin:0 0 8px}
+  #cdot{position:fixed;left:0;top:0;width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;background:var(--accent);
+        display:none;transition:transform .38s cubic-bezier(.3,.7,.3,1);box-shadow:0 0 0 6px rgba(110,168,255,.18)}
+  #cdot::after{content:"";position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px;border-radius:50%;background:#0b1020}
+  #cdot.collect{animation:shrink 1s linear forwards}
+  #cdot.val{background:var(--good);box-shadow:0 0 0 6px rgba(76,195,138,.18)}
+  @keyframes shrink{to{width:14px;height:14px;margin:-7px 0 0 -7px}}
+  #btnStats{display:none}
+  .mobileOnly{display:none}
+  #camSel{width:100%;margin-top:6px}
+  @media (max-width: 820px){
+    body{grid-template-columns:1fr}
+    header{grid-column:1;flex-wrap:wrap;gap:6px;padding:6px 8px}
+    header h1,kbd,.spacer{display:none}
+    #btnStats{display:inline-block}
+    header .btn{padding:5px 10px}
+    #status{order:10;font-size:11px}
+    aside{position:fixed;left:0;right:0;bottom:0;max-height:72vh;z-index:60;border-left:0;border-top:1px solid var(--line);
+          border-radius:14px 14px 0 0;transform:translateY(105%);transition:transform .25s;box-shadow:0 -12px 30px rgba(0,0,0,.55)}
+    body.panel-open aside{transform:none}
+    #readScroll{padding:16px 18px 90px}
+    article{font-size:19px;line-height:2.35}
+    #readBar{flex-wrap:wrap}
+    #readBar .hint{display:none}
+    .card{margin:12px;padding:18px;max-height:calc(100vh - 24px);overflow:auto}
+    .cell b{font-size:20px}
+    .mobileOnly{display:list-item}
+  }
+  #calibProgress{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);color:var(--muted);font-size:13px;display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Gaze <span>Lab</span></h1>
+  <div class="tabs">
+    <button id="tabFree" class="on">Free gaze</button>
+    <button id="tabRead">Reading</button>
+  </div>
+  <span id="status" class="pill"><i></i><b style="font-weight:500">Not started</b></span>
+  <span id="moveChip" class="chip">You moved — press D or recalibrate</span>
+  <div class="spacer"></div>
+  <button class="btn" id="btnDrift" disabled>Drift fix<kbd>D</kbd></button>
+  <button class="btn primary" id="btnCalib" disabled>Calibrate<kbd>C</kbd></button>
+  <button class="btn" id="btnStats">Stats</button>
+</header>
+
+<main>
+  <section id="freeView"></section>
+
+  <section id="readView">
+    <div id="readScroll">
+      <div id="readBar">
+        <select id="passage"></select>
+        <button class="btn" id="btnPaste">Paste your own text</button>
+        <span class="muted small hint">Click a line to tell the tracker where you are.</span>
+      </div>
+      <div id="pasteBox">
+        <textarea id="pasteText" placeholder="Paste any text here. Blank lines separate paragraphs."></textarea>
+        <div class="row" style="margin-top:8px"><button class="btn primary" id="btnUsePaste">Use this text</button><button class="btn" id="btnCancelPaste">Cancel</button></div>
+      </div>
+      <article id="article"></article>
+    </div>
+    <div id="lineHL"></div>
+    <div id="lineMarks"></div>
+  </section>
+</main>
+
+<aside>
+  <h3>Camera</h3>
+  <canvas id="preview" width="320" height="180"></canvas>
+  <select id="camSel" title="Camera"></select>
+  <div class="kv small" style="margin-top:6px">
+    <span>Face</span><span id="mFace">–</span>
+    <span>Tracking rate</span><span id="mFps">–</span>
+  </div>
+
+  <h3>Calibration</h3>
+  <div class="kv small">
+    <span>Accuracy</span><span id="mAcc">not calibrated</span>
+    <span>Precision (jitter)</span><span id="mPrec">–</span>
+  </div>
+
+  <h3>Focus</h3>
+  <div class="row" style="align-items:baseline;gap:6px"><span class="big" id="mFocus">–</span><span class="muted small" id="mFocusLbl">on screen</span></div>
+  <canvas id="timeline" width="540" height="92" style="margin-top:6px"></canvas>
+  <div class="legend"><span><i style="background:var(--good)"></i>reading</span><span><i style="background:#6c7389"></i>on screen</span><span><i style="background:var(--bad)"></i>away</span><span style="margin-left:auto">last 5 min</span></div>
+
+  <h3>Session</h3>
+  <div class="kv small">
+    <span>Time</span><span id="mTime">0:00</span>
+    <span>On screen</span><span id="mOn">–</span>
+    <span>Looked away</span><span id="mAway">0×</span>
+    <span>Blinks / min</span><span id="mBlink">–</span>
+  </div>
+
+  <h3>Reading</h3>
+  <div class="kv small">
+    <span>Current line</span><span id="mLine">–</span>
+    <span>Lines read (sweeps)</span><span id="mLines">0</span>
+    <span>Lines / min</span><span id="mLpm">–</span>
+    <span>Look-backs (approx.)</span><span id="mReg">0</span>
+    <span>Focus streak / best</span><span id="mStreak">0:00 / 0:00</span>
+  </div>
+
+  <h3>Display</h3>
+  <label class="opt"><input type="checkbox" id="optDot" checked> Show gaze dot <kbd>G</kbd></label>
+  <label class="opt"><input type="checkbox" id="optHeat"> Heatmap <kbd>H</kbd></label>
+  <label class="opt"><input type="checkbox" id="optDrift" checked> Auto drift correction (reading)</label>
+  <label class="opt small">Smoothing <input type="range" id="optSmooth" min="1" max="10" value="6" style="flex:1"></label>
+  <label class="opt small">Calibration points
+    <select id="optPts"><option value="9">9 (quick)</option><option value="13" selected>13</option><option value="16">16 (best)</option></select></label>
+  <label class="opt small"><input type="checkbox" id="optFs" checked> Go fullscreen when calibrating</label>
+
+  <h3>Data</h3>
+  <div class="row">
+    <button class="btn" id="btnCsv">Export CSV</button>
+    <button class="btn" id="btnClearHeat">Clear heatmap</button>
+    <button class="btn" id="btnReset">Reset session</button>
+  </div>
+  <p class="muted small" style="margin-top:14px">Video is processed on this computer and never leaves the page. Only the face model is downloaded.</p>
+</aside>
+
+<canvas id="heat"></canvas>
+<div id="dot"></div>
+
+<div class="overlay show" id="intro">
+  <div class="card">
+    <h2>Webcam eye tracker</h2>
+    <p class="muted">Estimates where on the screen you're looking, tracks which line you're reading, and logs simple focus signals. Everything runs on this computer.</p>
+    <ul>
+      <li>Light your face from the front. A window behind you makes tracking much worse.</li>
+      <li>Sit at arm's length (about 50–70 cm), with the camera at the top of the screen.</li>
+      <li>Keep your head fairly still after calibrating. If you move a lot, press <b>D</b> (drift fix) or recalibrate.</li>
+      <li>Glasses are fine, but strong reflections on the lenses hurt accuracy.</li>
+      <li class="mobileOnly"><b>On a phone:</b> prop it up rather than holding it, about 25–35 cm from your face. Pick portrait or landscape before calibrating, and recalibrate if you rotate it.</li>
+    </ul>
+    <div class="row" style="margin-top:16px"><button class="btn primary" id="btnStart">Start camera</button><span class="muted small" id="startMsg"></span></div>
+    <div class="err" id="startErr"></div>
+  </div>
+</div>
+
+<div class="overlay" id="calib">
+  <div id="calibMsg">
+    <h2 id="calibTitle">Calibration</h2>
+    <p class="muted" id="calibText">Look straight at each dot until it shrinks and moves on. Follow it with your eyes, and try to keep your head still.</p>
+    <div class="row" style="justify-content:center;margin-top:14px" id="calibBtns">
+      <button class="btn primary" id="btnCalibGo">Start</button><button class="btn" id="btnCalibCancel">Cancel</button>
+    </div>
+  </div>
+  <div id="cdot"></div>
+  <div id="calibProgress"></div>
+</div>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs";
+const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm";
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+const $ = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const fmtTime = s => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+
+/* ---------------- maths: one-euro filter, ridge regression ---------------- */
+class LowPass { constructor() { this.y = null; } f(x, a) { this.y = this.y === null ? x : a * x + (1 - a) * this.y; return this.y; } }
+class OneEuro {
+  constructor(minCutoff, beta, dCutoff = 1) { this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff; this.reset(); }
+  reset() { this.x = new LowPass(); this.dx = new LowPass(); this.t = null; }
+  static alpha(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
+  filter(x, tMs) {
+    if (this.t === null) { this.t = tMs; this.dx.f(0, 1); return this.x.f(x, 1); }
+    const dt = Math.max(1e-3, (tMs - this.t) / 1000); this.t = tMs;
+    const dx = (x - this.x.y) / dt;
+    const edx = this.dx.f(dx, OneEuro.alpha(this.dCutoff, dt));
+    const cutoff = this.minCutoff + this.beta * Math.abs(edx);
+    return this.x.f(x, OneEuro.alpha(cutoff, dt));
+  }
+}
+
+function solve(A, B) { // A: m×m, B: m×k  (Gaussian elimination, partial pivoting)
+  const m = A.length, k = B[0].length;
+  const M = A.map((row, i) => row.concat(B[i]));
+  for (let c = 0; c < m; c++) {
+    let p = c; for (let r = c + 1; r < m; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    [M[c], M[p]] = [M[p], M[c]];
+    const d = M[c][c] || 1e-12;
+    for (let r = 0; r < m; r++) if (r !== c) {
+      const f = M[r][c] / d; if (!f) continue;
+      for (let j = c; j < m + k; j++) M[r][j] -= f * M[c][j];
+    }
+  }
+  return M.map((row, i) => row.slice(m).map(v => v / (M[i][i] || 1e-12)));
+}
+
+function fitRidge(samples, lambda) {
+  const n = samples.length, d = samples[0].f.length;
+  const mean = new Array(d).fill(0), std = new Array(d).fill(0);
+  for (const s of samples) for (let j = 0; j < d; j++) mean[j] += s.f[j] / n;
+  for (const s of samples) for (let j = 0; j < d; j++) std[j] += (s.f[j] - mean[j]) ** 2 / n;
+  for (let j = 0; j < d; j++) std[j] = Math.sqrt(std[j]);
+  const Z = samples.map(s => [1, ...s.f.map((v, j) => std[j] > 1e-9 ? (v - mean[j]) / std[j] : 0)]);
+  const D = d + 1;
+  const A = Array.from({ length: D }, () => new Array(D).fill(0));
+  const B = Array.from({ length: D }, () => [0, 0]);
+  for (let i = 0; i < n; i++) {
+    const z = Z[i], t = samples[i].t;
+    for (let a = 0; a < D; a++) {
+      B[a][0] += z[a] * t[0]; B[a][1] += z[a] * t[1];
+      for (let b = a; b < D; b++) A[a][b] += z[a] * z[b];
+    }
+  }
+  for (let a = 0; a < D; a++) for (let b = 0; b < a; b++) A[a][b] = A[b][a];
+  for (let a = 1; a < D; a++) A[a][a] += lambda;
+  return { mean, std, W: solve(A, B) };
+}
+function predict(model, f) {
+  const { mean, std, W } = model;
+  let x = W[0][0], y = W[0][1];
+  for (let j = 0; j < f.length; j++) {
+    const z = std[j] > 1e-9 ? (f[j] - mean[j]) / std[j] : 0;
+    x += z * W[j + 1][0]; y += z * W[j + 1][1];
+  }
+  return [x, y];
+}
+function trainWithCV(samples, nGroups) {
+  const lambdas = [0.3, 1, 3, 10, 30, 100, 300, 1000];
+  let best = null;
+  for (const lam of lambdas) {
+    let err = 0, cnt = 0;
+    for (let g = 0; g < nGroups; g++) {
+      const tr = samples.filter(s => s.g !== g), te = samples.filter(s => s.g === g);
+      if (!te.length || tr.length < 20) continue;
+      const m = fitRidge(tr, lam);
+      for (const s of te) { const p = predict(m, s.f); err += Math.hypot(p[0] - s.t[0], p[1] - s.t[1]); cnt++; }
+    }
+    const e = err / Math.max(1, cnt);
+    if (!best || e < best.e) best = { lam, e };
+  }
+  return { model: fitRidge(samples, best.lam), lambda: best.lam, cvErr: best.e };
+}
+
+/* ---------------- state ---------------- */
+const video = document.createElement("video");
+video.playsInline = true; video.muted = true; video.setAttribute("playsinline", "");
+video.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none";
+document.body.appendChild(video);
+const COARSE = matchMedia("(pointer: coarse)").matches;
+const S = {
+  landmarker: null, mode: "free",
+  model: null, bias: [0, 0], calibrated: false, calibrating: false, abortCalib: false,
+  collecting: null, calibRef: null, calibVW: 0, calibVH: 0,
+  feat: null, face: false, blink: false, openBase: null, blinkTimes: [], lastBlinkT: 0,
+  gaze: null, raw: null, fx: null, fy: null,
+  frames: 0, fpsT: performance.now(), fps: 0,
+  sigma: 60, precision: null,
+};
+const prefs = { dot: true, heat: false, drift: true, smooth: 6 };
+let lastVideoTime = -1;
+
+function makeFilters() {
+  const minCut = [2.2, 1.8, 1.4, 1.1, 0.85, 0.65, 0.5, 0.38, 0.28, 0.2][prefs.smooth - 1];
+  S.fx = new OneEuro(minCut, 0.004); S.fy = new OneEuro(minCut, 0.004);
+}
+makeFilters();
+
+/* ---------------- camera + model ---------------- */
+$("#btnStart").onclick = async () => {
+  const msg = $("#startMsg"), err = $("#startErr");
+  $("#btnStart").disabled = true; err.textContent = "";
+  try {
+    msg.textContent = "Asking for camera…";
+    await openCamera(null);
+    msg.textContent = "Loading face model (≈4 MB)…";
+    const files = await FilesetResolver.forVisionTasks(WASM_BASE);
+    const opts = d => ({ baseOptions: { modelAssetPath: MODEL_URL, delegate: d }, runningMode: "VIDEO", numFaces: 1, outputFaceBlendshapes: true });
+    try { S.landmarker = await FaceLandmarker.createFromOptions(files, opts("GPU")); }
+    catch (e) { console.warn("GPU delegate failed, using CPU", e); S.landmarker = await FaceLandmarker.createFromOptions(files, opts("CPU")); }
+    $("#intro").classList.remove("show");
+    $("#btnCalib").disabled = false;
+    setStatus("warn", "Camera on — calibrate to start tracking");
+    session.reset();
+    keepAwake(); listCameras();
+    requestAnimationFrame(loop);
+  } catch (e) {
+    console.error(e);
+    $("#btnStart").disabled = false; msg.textContent = "";
+    let t = String(e && e.message || e);
+    if (e && (e.name === "NotAllowedError" || e.name === "SecurityError"))
+      t = "The browser blocked the camera.\n\nIf you opened this file directly and the camera stays blocked, serve it locally instead:\n  python3 -m http.server 8000\nthen open http://localhost:8000/gaze-lab.html in Chrome.";
+    else if (e && e.name === "NotFoundError") t = "No camera found.";
+    else t = "Couldn't start: " + t + "\n\nThe face model loads from cdn.jsdelivr.net and storage.googleapis.com, so you need to be online the first time.";
+    err.textContent = t;
+  }
+};
+
+async function openCamera(deviceId) {
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  const v = deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+                     : { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } };
+  const stream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+  video.srcObject = stream; await video.play();
+  lastVideoTime = -1;
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  pv.width = 320; pv.height = Math.round(320 * vh / vw);
+  return stream;
+}
+async function listCameras() {
+  try {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+    const cur = video.srcObject && video.srcObject.getVideoTracks()[0];
+    const curId = cur && cur.getSettings().deviceId;
+    const selEl = $("#camSel"); selEl.innerHTML = "";
+    cams.forEach((c, i) => { const o = document.createElement("option"); o.value = c.deviceId; o.textContent = c.label || "Camera " + (i + 1); selEl.appendChild(o); });
+    if (curId) selEl.value = curId;
+    selEl.style.display = cams.length > 1 ? "block" : "none";
+  } catch (e) { console.warn(e); }
+}
+$("#camSel").onchange = async e => {
+  try {
+    await openCamera(e.target.value);
+    S.calibrated = false; S.calibRef = null; $("#btnDrift").disabled = true; dotEl.style.display = "none";
+    $("#mAcc").textContent = "not calibrated"; $("#mPrec").textContent = "–";
+    setStatus("warn", "New camera — calibrate again");
+  } catch (err) { setStatus("bad", "Couldn't open that camera"); }
+};
+let wakeLock = null;
+async function keepAwake() { try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { } }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.landmarker) keepAwake(); });
+$("#btnStats").onclick = () => document.body.classList.toggle("panel-open");
+
+function setStatus(kind, text) {
+  const el = $("#status"); el.className = "pill " + kind; el.querySelector("b").textContent = text;
+}
+
+function loop() {
+  requestAnimationFrame(loop);
+  if (!S.landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const now = performance.now();
+  let res;
+  try { res = S.landmarker.detectForVideo(video, now); } catch (e) { console.error(e); return; }
+  onFrame(res, now);
+}
+
+/* ---------------- features ---------------- */
+let bsIndex = null;
+const BS_NAMES = ["eyeLookUpLeft", "eyeLookUpRight", "eyeLookDownLeft", "eyeLookDownRight", "eyeLookInLeft", "eyeLookInRight", "eyeLookOutLeft", "eyeLookOutRight", "eyeBlinkLeft", "eyeBlinkRight"];
+const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+const dot2 = (a, b) => a[0] * b[0] + a[1] * b[1];
+
+function extract(res) {
+  const lm = res.faceLandmarks && res.faceLandmarks[0];
+  if (!lm || lm.length < 478) return null;
+  const W = video.videoWidth || 1280, H = video.videoHeight || 720;
+  const P = i => [lm[i].x * W, lm[i].y * H];
+  const rO = P(33), rI = P(133), lO = P(263), lI = P(362);
+  const rMid = mid(rO, rI), lMid = mid(lO, lI);
+  const iA = P(468), iB = P(473);
+  let rIris = iA, lIris = iB;
+  if (dist(iA, rMid) + dist(iB, lMid) > dist(iA, lMid) + dist(iB, rMid)) { rIris = iB; lIris = iA; }
+  // face-aligned frame: u runs from the image-left eye to the image-right eye, v points "down" the face
+  const [e0, e1] = rO[0] < lO[0] ? [rO, lO] : [lO, rO];
+  const iod = dist(e0, e1) || 1;
+  const u = [(e1[0] - e0[0]) / iod, (e1[1] - e0[1]) / iod], v = [-u[1], u[0]];
+  const eye = (o, i, up, low, iris, m) => {
+    const w = dist(o, i) || 1, d = [iris[0] - m[0], iris[1] - m[1]];
+    return [dot2(d, u) / w, dot2(d, v) / w, dist(P(up), P(low)) / w];
+  };
+  const [hR, vR, oR] = eye(rO, rI, 159, 145, rIris, rMid);
+  const [hL, vL, oL] = eye(lO, lI, 386, 374, lIris, lMid);
+  const hA = (hR + hL) / 2, vA = (vR + vL) / 2;
+  const eyeMid = mid(rMid, lMid), nose = P(1);
+  const dn = [nose[0] - eyeMid[0], nose[1] - eyeMid[1]];
+  const yaw = dot2(dn, u) / iod, pitch = dot2(dn, v) / iod, roll = Math.atan2(u[1], u[0]);
+  const px = eyeMid[0] / W, py = eyeMid[1] / H, scale = iod / W;
+
+  const bs = new Array(BS_NAMES.length).fill(0);
+  const cats = res.faceBlendshapes && res.faceBlendshapes[0] && res.faceBlendshapes[0].categories;
+  if (cats) {
+    if (!bsIndex) { bsIndex = BS_NAMES.map(n => cats.findIndex(c => c.categoryName === n)); }
+    bsIndex.forEach((ix, k) => { if (ix >= 0 && cats[ix]) bs[k] = cats[ix].score; });
+  }
+  const f = [hR, vR, hL, vL, oR, oL, hA * hA, vA * vA, hA * vA, ...bs.slice(0, 8), yaw, pitch, roll, px, py, scale];
+  return { f, open: (oR + oL) / 2, blinkScore: (bs[8] + bs[9]) / 2, scale, px, py, pts: { rO, rI, lO, lI, rIris, lIris }, W, H };
+}
+
+/* ---------------- per frame ---------------- */
+function onFrame(res, t) {
+  S.frames++;
+  if (t - S.fpsT > 1000) { S.fps = S.frames * 1000 / (t - S.fpsT); S.frames = 0; S.fpsT = t; }
+  const F = extract(res);
+  S.feat = F; S.face = !!F;
+  drawPreview(F);
+
+  let blink = false;
+  if (F) {
+    if (S.openBase === null) S.openBase = F.open;
+    if (F.blinkScore < 0.4) S.openBase += 0.02 * (F.open - S.openBase);
+    blink = F.blinkScore > 0.5 && F.open < 0.7 * S.openBase;
+    if (blink && !S.blink && t - S.lastBlinkT > 200) { S.lastBlinkT = t; S.blinkTimes.push(t); session.blink(); }
+  }
+  S.blink = blink;
+
+  if (S.collecting && F && !blink) S.collecting.push(F.f.slice());
+
+  if (!S.calibrated || S.calibrating) { session.frame(t, F, null); return; }
+
+  let g = null;
+  if (F && !blink) {
+    const p = predict(S.model, F.f);
+    const rx = p[0] + S.bias[0], ry = p[1] + S.bias[1];
+    S.raw = [rx, ry];
+    g = [S.fx.filter(rx, t), S.fy.filter(ry, t)];
+    S.gaze = g;
+    checkMovement(F);
+  } else if (F && blink) {
+    g = S.gaze; // hold through blinks
+  } else {
+    S.gaze = null;
+  }
+  updateGazeUI(g);
+  const rd = S.mode === "reading" && g && S.raw ? reader.update(t, g[0], g[1]) : null;
+  if (S.mode === "free" && g) freeView.update(g);
+  if (g && prefs.heat) heat.add(g);
+  else if (g) heat.add(g, true);
+  session.frame(t, F, g, rd);
+}
+
+let moveTimer = 0;
+function checkMovement(F) {
+  if (!S.calibRef) return;
+  const ds = Math.abs(F.scale - S.calibRef.scale) / S.calibRef.scale;
+  const dp = Math.hypot(F.px - S.calibRef.px, F.py - S.calibRef.py);
+  const moved = ds > 0.16 || dp > 0.12;
+  moveTimer = moved ? moveTimer + 1 : 0;
+  const chip = $("#moveChip");
+  if (moveTimer > 30) { chip.textContent = "You moved — press D or recalibrate"; chip.style.display = "inline-block"; }
+  else if (chip.dataset.reason !== "resize") chip.style.display = "none";
+}
+
+/* ---------------- preview ---------------- */
+const pv = $("#preview"), pctx = pv.getContext("2d");
+function drawPreview(F) {
+  const W = pv.width, H = pv.height;
+  pctx.save(); pctx.translate(W, 0); pctx.scale(-1, 1);
+  pctx.drawImage(video, 0, 0, W, H);
+  if (F) {
+    const sx = W / F.W, sy = H / F.H;
+    pctx.fillStyle = "rgba(110,168,255,.9)";
+    for (const k of ["rO", "rI", "lO", "lI"]) { const p = F.pts[k]; pctx.fillRect(p[0] * sx - 1.5, p[1] * sy - 1.5, 3, 3); }
+    pctx.fillStyle = "rgba(255,120,90,.95)";
+    for (const k of ["rIris", "lIris"]) { const p = F.pts[k]; pctx.beginPath(); pctx.arc(p[0] * sx, p[1] * sy, 2.6, 0, 7); pctx.fill(); }
+  }
+  pctx.restore();
+}
+
+/* ---------------- gaze dot ---------------- */
+const dotEl = $("#dot");
+function updateGazeUI(g) {
+  if (!g || !prefs.dot) { dotEl.style.display = "none"; return; }
+  dotEl.style.display = "block";
+  dotEl.style.transform = `translate(${clamp(g[0], 0, innerWidth)}px,${clamp(g[1], 0, innerHeight)}px)`;
+}
+
+/* ---------------- heatmap ---------------- */
+const heat = (() => {
+  const cv = $("#heat"), ctx = cv.getContext("2d");
+  const CELL = 8; let gw = 0, gh = 0, grid = null, maxV = 1e-6, dirty = false, lastDraw = 0;
+  function resize() { cv.width = Math.ceil(innerWidth / CELL); cv.height = Math.ceil(innerHeight / CELL); gw = cv.width; gh = cv.height; grid = new Float32Array(gw * gh); maxV = 1e-6; cv.style.width = innerWidth + "px"; cv.style.height = innerHeight + "px"; }
+  resize();
+  const R = 6, SIG = 3.2, K = [];
+  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) K.push([dx, dy, Math.exp(-(dx * dx + dy * dy) / (2 * SIG * SIG))]);
+  function add(g, quiet) {
+    const cx = Math.round(g[0] / CELL), cy = Math.round(g[1] / CELL);
+    for (const [dx, dy, w] of K) {
+      const x = cx + dx, y = cy + dy; if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
+      const i = y * gw + x; grid[i] += w; if (grid[i] > maxV) maxV = grid[i];
+    }
+    dirty = true;
+    if (!quiet) { const now = performance.now(); if (now - lastDraw > 250) { draw(); lastDraw = now; } }
+  }
+  function colour(v) { // dark blue -> cyan -> yellow -> red
+    const stops = [[0, [20, 40, 120, 0]], [0.25, [40, 120, 220, 120]], [0.5, [60, 210, 200, 170]], [0.75, [240, 220, 70, 200]], [1, [240, 70, 50, 230]]];
+    for (let i = 1; i < stops.length; i++) if (v <= stops[i][0]) {
+      const [a, ca] = stops[i - 1], [b, cb] = stops[i], f = (v - a) / (b - a);
+      return ca.map((c, k) => c + (cb[k] - c) * f);
+    }
+    return stops[stops.length - 1][1];
+  }
+  function draw() {
+    if (!dirty) return; dirty = false;
+    const img = ctx.createImageData(gw, gh);
+    for (let i = 0; i < grid.length; i++) {
+      const v = Math.sqrt(grid[i] / maxV); if (v < 0.03) continue;
+      const c = colour(v); img.data.set([c[0], c[1], c[2], c[3]], i * 4);
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  function clear() { grid.fill(0); maxV = 1e-6; dirty = true; draw(); }
+  return { add, draw, clear, resize, show(on) { cv.style.display = on ? "block" : "none"; if (on) { dirty = true; draw(); } } };
+})();
+
+/* ---------------- free gaze view (3×3 regions) ---------------- */
+const freeView = (() => {
+  const root = $("#freeView"), cells = [], dwell = new Array(9).fill(0);
+  for (let i = 0; i < 9; i++) { const c = document.createElement("div"); c.className = "cell"; c.innerHTML = "<b>–</b><span class='small'></span>"; root.appendChild(c); cells.push(c); }
+  let active = -1, total = 0;
+  function update(g) {
+    const r = root.getBoundingClientRect();
+    const cx = Math.floor((g[0] - r.left) / (r.width / 3)), cy = Math.floor((g[1] - r.top) / (r.height / 3));
+    const i = cx >= 0 && cx < 3 && cy >= 0 && cy < 3 ? cy * 3 + cx : -1;
+    if (i >= 0) { dwell[i]++; total++; }
+    if (i !== active) { if (active >= 0) cells[active].classList.remove("active"); if (i >= 0) cells[i].classList.add("active"); active = i; }
+  }
+  function render() { cells.forEach((c, i) => { c.querySelector("b").textContent = total ? Math.round(100 * dwell[i] / total) + "%" : "–"; }); }
+  function reset() { dwell.fill(0); total = 0; render(); }
+  return { update, render, reset };
+})();
+
+/* ---------------- reading view + line tracker ---------------- */
+const PASSAGES = [
+  { title: "Your eyes jump", text: `Your eyes do not glide across a line of text. They jump. Each jump, called a saccade, takes a few tens of milliseconds, and while it happens your brain quietly ignores the blur. Between jumps the eyes hold still for about a quarter of a second. These pauses are fixations, and they are where the actual reading takes place.
+
+Skilled readers skip many short, predictable words and land a little left of the middle of longer ones. Now and then the eyes slip backwards to check something they missed. Those backward jumps are called regressions, and they become more frequent when a sentence is confusing or when attention fades.
+
+At the end of each line the eyes make one long sweep back to the left margin, often landing slightly short of the first word and correcting with a small hop. That return sweep is the most recognisable pattern in reading. Even a noisy webcam can usually see it, which is why this page counts lines by looking for sweeps rather than trusting the exact height of your gaze.` },
+  { title: "Reading without reading", text: `Almost everyone has reached the bottom of a page and realised that none of it went in. Psychologists call this mindless reading, and it is surprisingly hard to notice from the inside. The eyes keep moving, the pages keep turning, and the mind is somewhere else entirely.
+
+From the outside it looks a little different. When attention is on the text, the eyes respond to it: rare or difficult words hold them longer, and surprising phrases pull them back for a second look. When the mind drifts, that sensitivity fades. Fixations tend to grow longer and more uniform, and the rhythm becomes almost mechanical, as if the eyes were following the lines out of habit.
+
+A webcam cannot see individual words, so this page settles for coarser signals. It watches whether your gaze stays on the text, whether it moves across the lines at a steady pace, and how often it leaves the screen altogether. None of these is proof of focus, but together they make a reasonable sketch of an afternoon.` },
+  { title: "The keeper's second ledger", text: `The keeper of the northern light kept two ledgers. The first was official: oil burned, wicks trimmed, ships sighted, weather at dawn and dusk. The inspectors read it twice a year and found nothing to complain about. The second ledger lived under a loose board beneath his bed, and nobody read it at all.
+
+In the second ledger he wrote down the things the sea brought him. A single glove, blue, left hand. A bottle with no message inside, which he considered a message of its own. A wooden horse missing one ear. A gull that came to the railing every morning for eleven days and then never again.
+
+When the light was finally automated, the inspectors came for the official ledger and thanked him for his years of service. He packed the second one in his coat. On the train south he opened it for the first time in a long while, and found that he remembered every entry, and that the official one had already begun to fade.` },
+];
+const article = $("#article");
+function setText(title, text) {
+  const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const paras = text.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  article.innerHTML = (title ? `<h2>${esc(title)}</h2>` : "") +
+    paras.map(p => "<p>" + p.split(/\s+/).map(w => `<span class="w">${esc(w)}</span>`).join(" ") + "</p>").join("");
+  $("#readScroll").scrollTop = 0;
+  reader.relayout(true);
+}
+const sel = $("#passage");
+PASSAGES.forEach((p, i) => { const o = document.createElement("option"); o.value = i; o.textContent = p.title; sel.appendChild(o); });
+sel.onchange = () => { const p = PASSAGES[+sel.value]; if (p) setText(p.title, p.text); };
+$("#btnPaste").onclick = () => { $("#pasteBox").style.display = "block"; $("#pasteText").focus(); };
+$("#btnCancelPaste").onclick = () => { $("#pasteBox").style.display = "none"; };
+$("#btnUsePaste").onclick = () => {
+  const t = $("#pasteText").value.trim(); if (!t) return;
+  let o = sel.querySelector("option[value=custom]");
+  if (!o) { o = document.createElement("option"); o.value = "custom"; o.textContent = "Your text"; sel.appendChild(o); }
+  sel.value = "custom"; $("#pasteBox").style.display = "none"; setText("", t);
+};
+
+const reader = (() => {
+  let lines = [], p = [], cur = -1, drift = 0, pitch = 50;
+  let regOk = true;
+  let lastSweep = -1e9, lastReg = -1e9, fastX = null, buf = [], spanMin = Infinity, spanMax = -Infinity;
+  const readSet = new Set();
+  let stats = { sweeps: 0, regressions: 0 };
+  const hl = $("#lineHL"), marks = $("#lineMarks"); let marksKey = "";
+
+  function relayout(reset) {
+    const spans = article.querySelectorAll("span.w");
+    const L = [];
+    for (const s of spans) {
+      const r = s.getBoundingClientRect();
+      let last = L[L.length - 1];
+      if (!last || Math.abs(r.top - last.top0) > 4) { last = { top0: r.top, top: r.top, bottom: r.bottom, left: r.left, right: r.right }; L.push(last); }
+      else { last.left = Math.min(last.left, r.left); last.right = Math.max(last.right, r.right); last.top = Math.min(last.top, r.top); last.bottom = Math.max(last.bottom, r.bottom); }
+    }
+    L.forEach(l => l.cy = (l.top + l.bottom) / 2);
+    if (L.length > 1) { const d = []; for (let i = 1; i < L.length; i++) d.push(L[i].cy - L[i - 1].cy); d.sort((a, b) => a - b); pitch = d[0] || 50; }
+    const changed = L.length !== lines.length;
+    lines = L;
+    if (reset || changed) { p = lines.map((_, i) => i === 0 ? 0.6 : 0.4 / Math.max(1, lines.length - 1)); cur = lines.length ? 0 : -1; readSet.clear(); drift = 0; }
+    render();
+  }
+  function bounds() {
+    let l = Infinity, r = -Infinity; for (const x of lines) { l = Math.min(l, x.left); r = Math.max(r, x.right); }
+    return { l, r, w: Math.max(1, r - l) };
+  }
+  function render() {
+    if (cur >= 0 && lines[cur] && S.mode === "reading" && S.calibrated) {
+      const b = bounds(), ln = lines[cur];
+      hl.style.display = "block";
+      hl.style.left = (b.l - 12) + "px"; hl.style.width = (b.w + 24) + "px";
+      hl.style.top = (ln.cy - pitch / 2) + "px"; hl.style.height = pitch + "px";
+    } else hl.style.display = "none";
+    const b = bounds();
+    const key = [...readSet].join(",") + "|" + Math.round(lines[0] ? lines[0].cy : 0) + "|" + Math.round(b.l);
+    if (key === marksKey) return; marksKey = key;
+    marks.innerHTML = "";
+    for (const i of readSet) { const ln = lines[i]; if (!ln) continue; const m = document.createElement("div"); m.style.left = Math.max(2, b.l - 26) + "px"; m.style.top = (ln.cy - pitch * 0.3) + "px"; m.style.height = (pitch * 0.6) + "px"; marks.appendChild(m); }
+  }
+  function setLine(i, gyRaw) {
+    if (!lines.length) return;
+    i = clamp(i, 0, lines.length - 1);
+    p = lines.map((_, k) => k === i ? 0.9 : 0.1 / Math.max(1, lines.length - 1));
+    cur = i; spanMin = Infinity; spanMax = -Infinity;
+    if (gyRaw != null) drift = clamp(gyRaw - lines[i].cy, -pitch * 3, pitch * 3);
+    render();
+  }
+
+  function update(t, gx, gyRaw) {
+    const N = lines.length; if (!N) return null;
+    const b = bounds();
+    const gy = gyRaw - (prefs.drift ? drift : 0);
+    const onText = gx > b.l - 160 && gx < b.r + 160 && gy > lines[0].top - pitch * 2 && gy < lines[N - 1].bottom + pitch * 2
+      && gy > -40 && gy < innerHeight + 40;
+    fastX = fastX === null ? gx : fastX + 0.45 * (gx - fastX);
+    buf.push({ t, x: fastX }); while (buf.length && t - buf[0].t > 1000) buf.shift();
+    if (!onText) return { onText: false, sweep: false, x: fastX };
+
+    let sweep = false, regression = false;
+    // judge the sweep against the current line's own length, so short last lines of paragraphs count too
+    const lw = cur >= 0 && lines[cur] ? Math.max(0.3 * b.w, lines[cur].right - b.l) : b.w;
+    let maxX = -Infinity; for (const s of buf) if (t - s.t < 900) maxX = Math.max(maxX, s.x);
+    if (t - lastSweep > 1200 && fastX < b.l + 0.35 * b.w && maxX > b.l + 0.6 * lw && maxX - fastX > Math.max(Math.min(180, 0.45 * b.w), 0.4 * lw)) {
+      sweep = true; lastSweep = t; stats.sweeps++;
+    } else if (t - lastReg > 450 && t - lastSweep > 600) {
+      let m2 = -Infinity; for (const s of buf) if (t - s.t < 250) m2 = Math.max(m2, s.x);
+      const drop = m2 - fastX;
+      const th = Math.max(150, 1.5 * (S.precision || 0));
+      regOk = th < 0.3 * b.w;
+      if (regOk && drop > th && drop < 0.3 * b.w) { regression = true; lastReg = t; stats.regressions++; }
+    }
+
+    // HMM over lines: transition, then (tempered) emission from vertical gaze
+    const q = new Array(N);
+    for (let i = 0; i < N; i++) {
+      if (sweep) q[i] = 0.08 * p[i] + (i > 0 ? 0.82 * p[i - 1] : 0) + (i > 1 ? 0.05 * p[i - 2] : 0) + 0.05 / N;
+      else q[i] = 0.985 * p[i] + 0.006 * ((p[i - 1] || 0) + (p[i + 1] || 0)) + 0.003 / N;
+    }
+    const sig = Math.max(S.sigma, pitch * 0.6) * 2.2;
+    let tot = 0;
+    for (let i = 0; i < N; i++) { const z = (gy - lines[i].cy) / sig; q[i] *= Math.exp(-0.5 * z * z) + 0.02; tot += q[i]; }
+    let best = 0;
+    for (let i = 0; i < N; i++) { q[i] /= tot || 1; if (q[i] > q[best]) best = i; }
+    p = q;
+    const prev = cur;
+    if (best !== cur) {
+      if (sweep && prev >= 0) readSet.add(prev);
+      cur = best; spanMin = Infinity; spanMax = -Infinity;
+    }
+    spanMin = Math.min(spanMin, fastX); spanMax = Math.max(spanMax, fastX);
+    if (spanMax - spanMin > 0.6 * Math.max(0.3 * b.w, lines[cur].right - b.l)) readSet.add(cur);
+    if (prefs.drift && p[cur] > 0.7) drift = clamp(drift + 0.004 * ((gyRaw - lines[cur].cy) - drift), -pitch * 3, pitch * 3);
+    render();
+    return { onText: true, sweep, regression, x: fastX, line: cur };
+  }
+  function resetStats() { stats = { sweeps: 0, regressions: 0 }; readSet.clear(); render(); }
+  return { relayout, update, render, setLine, resetStats, get stats() { return stats; }, get regOk() { return regOk; }, get cur() { return cur; }, get count() { return lines.length; }, lineAt(y) {
+    let bi = -1, bd = Infinity; lines.forEach((l, i) => { const d = Math.abs(l.cy - y); if (d < bd) { bd = d; bi = i; } }); return bi; } };
+})();
+$("#readScroll").addEventListener("scroll", () => reader.relayout(false), { passive: true });
+article.addEventListener("click", e => { const i = reader.lineAt(e.clientY); if (i >= 0) reader.setLine(i, S.raw ? S.raw[1] : null); });
+
+/* ---------------- session metrics ---------------- */
+const session = (() => {
+  let t0 = 0, secStart = 0, b = null, log = [], awayRun = 0, awayEvents = 0, streak = 0, best = 0, idleRun = 0, xs = [];
+  const newBucket = t => ({ t, frames: 0, face: 0, on: 0, onText: 0, sweeps: 0, blinks: 0, gx: 0, gy: 0, gn: 0 });
+  function reset() { t0 = performance.now(); secStart = t0; b = newBucket(t0); log = []; awayRun = 0; awayEvents = 0; streak = 0; best = 0; idleRun = 0; xs = []; S.blinkTimes = []; reader.resetStats(); freeView.reset(); }
+  function blink() { if (b) b.blinks++; }
+  function frame(t, F, g, rd) {
+    if (!b) return;
+    b.frames++; if (F) b.face++;
+    if (g) {
+      const on = g[0] > -0.08 * innerWidth && g[0] < 1.08 * innerWidth && g[1] > -0.1 * innerHeight && g[1] < 1.1 * innerHeight;
+      if (on) b.on++;
+      b.gx += g[0]; b.gy += g[1]; b.gn++;
+    }
+    if (rd) { if (rd.onText) b.onText++; if (rd.sweep) { b.sweeps++; xs = []; } if (rd.onText) xs.push([t, rd.x]); }
+    while (xs.length && t - xs[0][0] > 1500) xs.shift();
+    if (t - secStart >= 1000) closeSecond(t);
+  }
+  function slope() {
+    if (xs.length < 8) return 0;
+    const n = xs.length; let mt = 0, mx = 0; for (const [t, x] of xs) { mt += t; mx += x; } mt /= n; mx /= n;
+    let num = 0, den = 0; for (const [t, x] of xs) { num += (t - mt) * (x - mx); den += (t - mt) ** 2; }
+    return den ? num / den * 1000 : 0; // px per second
+  }
+  function closeSecond(t) {
+    const fr = Math.max(1, b.frames);
+    let st;
+    const tracking = S.calibrated && !S.calibrating;
+    if (!tracking) st = b.face / fr > 0.5 ? "on" : "away";
+    else if (b.face / fr < 0.5 || b.on / fr < 0.5) st = "away";
+    else if (S.mode === "reading" && b.onText / fr > 0.5 && (b.sweeps > 0 || slope() > 60)) st = "reading";
+    else st = "on";
+    if (S.calibrating) st = "calib";
+    const rec = { t: Math.round((b.t - t0) / 1000), state: st, mode: S.mode, tracking: tracking ? 1 : 0, face: +(b.face / fr).toFixed(2), on_screen: +(b.on / fr).toFixed(2), on_text: +(b.onText / fr).toFixed(2), sweeps: b.sweeps, blinks: b.blinks,
+      gaze_x: b.gn ? Math.round(b.gx / b.gn) : "", gaze_y: b.gn ? Math.round(b.gy / b.gn) : "", line: S.mode === "reading" ? reader.cur + 1 : "" };
+    log.push(rec);
+    if (st === "away") { awayRun++; if (awayRun === 2) awayEvents++; } else awayRun = 0;
+    if (S.mode === "reading" && tracking) {
+      if (st === "reading") { streak += 1 + idleRun; idleRun = 0; }
+      else if (st === "on" && idleRun < 3) idleRun++;
+      else { streak = 0; idleRun = 0; }
+      best = Math.max(best, streak);
+    }
+    secStart = t; b = newBucket(t);
+    renderStats();
+  }
+  function renderStats() {
+    const now = performance.now();
+    $("#mTime").textContent = fmtTime((now - t0) / 1000);
+    $("#mFace").textContent = S.face ? (S.blink ? "blink" : "detected") : "not found";
+    $("#mFps").textContent = S.fps ? Math.round(S.fps) + " fps" : "–";
+    const tracked = log.filter(r => r.tracking && r.state !== "calib");
+    const onCount = tracked.filter(r => r.state !== "away").length;
+    $("#mOn").textContent = tracked.length ? Math.round(100 * onCount / tracked.length) + "%" : "–";
+    $("#mAway").textContent = awayEvents + "×";
+    const recent = S.blinkTimes.filter(x => now - x < 60000); S.blinkTimes = recent;
+    const span = Math.min(60, (now - t0) / 1000);
+    $("#mBlink").textContent = span > 10 ? Math.round(recent.length * 60 / span) : "–";
+    const readLog = tracked.filter(r => r.mode === "reading");
+    const readSecs = readLog.filter(r => r.state === "reading").length;
+    if (S.mode === "reading") {
+      $("#mFocus").textContent = readLog.length ? Math.round(100 * readSecs / readLog.length) + "%" : "–";
+      $("#mFocusLbl").textContent = "of reading time spent actually reading";
+    } else {
+      $("#mFocus").textContent = tracked.length ? Math.round(100 * onCount / tracked.length) + "%" : "–";
+      $("#mFocusLbl").textContent = "of the time looking at the screen";
+    }
+    $("#mLine").textContent = S.mode === "reading" && reader.cur >= 0 ? `${reader.cur + 1} of ${reader.count}` : "–";
+    $("#mLines").textContent = reader.stats.sweeps;
+    const readMin = readLog.length / 60;
+    $("#mLpm").textContent = readMin > 0.25 ? (reader.stats.sweeps / readMin).toFixed(1) : "–";
+    $("#mReg").textContent = reader.regOk ? reader.stats.regressions : "n/a (too noisy)";
+    $("#mStreak").textContent = fmtTime(streak) + " / " + fmtTime(best);
+    freeView.render();
+    drawTimeline();
+    if (S.calibrated && !S.calibrating) setStatus(S.face ? "ok" : "bad", S.face ? "Tracking" : "No face in view");
+  }
+  const tl = $("#timeline"), tctx = tl.getContext("2d");
+  function drawTimeline() {
+    const W = tl.width, H = tl.height, N = 300, w = W / N;
+    tctx.clearRect(0, 0, W, H);
+    const items = log.slice(-N);
+    const col = { reading: "#4cc38a", on: "#6c7389", away: "#e5604f", calib: "#2a3042" };
+    items.forEach((r, i) => {
+      tctx.fillStyle = col[r.state] || "#333";
+      const h = r.state === "reading" ? H : r.state === "on" ? H * 0.55 : r.state === "away" ? H * 0.3 : H * 0.15;
+      tctx.fillRect((N - items.length + i) * w, H - h, Math.ceil(w), h);
+    });
+  }
+  function csv() {
+    if (!log.length) return "";
+    const keys = Object.keys(log[0]);
+    return [keys.join(","), ...log.map(r => keys.map(k => r[k]).join(","))].join("\n");
+  }
+  return { reset, frame, blink, csv, renderStats };
+})();
+
+/* ---------------- calibration ---------------- */
+function calibPoints(n) {
+  const m = 0.07, g3 = [m, 0.5, 1 - m];
+  let pts = [];
+  if (n === 16) { const g4 = [m, 0.36, 0.64, 1 - m]; for (const y of g4) for (const x of g4) pts.push([x, y]); }
+  else { for (const y of g3) for (const x of g3) pts.push([x, y]); if (n === 13) pts.push([0.28, 0.28], [0.72, 0.28], [0.28, 0.72], [0.72, 0.72]); }
+  // centre (or nearest to it) first, rest shuffled
+  pts.sort((a, b) => Math.hypot(a[0] - .5, a[1] - .5) - Math.hypot(b[0] - .5, b[1] - .5));
+  const first = pts.shift();
+  for (let i = pts.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pts[i], pts[j]] = [pts[j], pts[i]]; }
+  return [first, ...pts];
+}
+const cdot = $("#cdot");
+function moveDot(x, y) { cdot.style.transform = `translate(${x}px,${y}px)`; }
+async function collect(ms) {
+  S.collecting = [];
+  cdot.classList.remove("collect"); void cdot.offsetWidth; cdot.classList.add("collect");
+  await sleep(ms);
+  const out = S.collecting; S.collecting = null; cdot.classList.remove("collect");
+  return out;
+}
+function showCalib(title, text, buttons) {
+  $("#calibTitle").textContent = title; $("#calibText").textContent = text;
+  $("#calibMsg").style.display = "block"; $("#calibBtns").style.display = buttons ? "flex" : "none";
+  cdot.style.display = "none"; $("#calibProgress").style.display = "none";
+}
+
+function openCalibration() {
+  if (!S.landmarker || S.calibrating) return;
+  document.body.classList.remove("panel-open");
+  $("#calib").classList.add("show");
+  showCalib("Calibration", "Look straight at each dot until it shrinks and moves on. Follow it with your eyes, and try to keep your head still. Press Esc to cancel.", true);
+}
+$("#btnCalib").onclick = openCalibration;
+$("#btnCalibCancel").onclick = () => { $("#calib").classList.remove("show"); };
+$("#btnCalibGo").onclick = () => runCalibration();
+
+async function runCalibration() {
+  if ($("#optFs").checked && !document.fullscreenElement) { try { await document.documentElement.requestFullscreen(); } catch (e) { } await sleep(600); }
+  S.calibrating = true; S.abortCalib = false;
+  $("#calibMsg").style.display = "none"; $("#calibProgress").style.display = "block";
+  cdot.classList.remove("val"); cdot.style.display = "block";
+  const VW = innerWidth, VH = innerHeight;
+  const pts = calibPoints(+$("#optPts").value);
+  const samples = [];
+  moveDot(VW / 2, VH / 2); await sleep(400);
+  for (let i = 0; i < pts.length && !S.abortCalib; i++) {
+    const tx = pts[i][0] * VW, ty = pts[i][1] * VH;
+    $("#calibProgress").textContent = `Point ${i + 1} of ${pts.length}`;
+    moveDot(tx, ty); await sleep(i === 0 ? 1000 : 750);
+    const got = await collect(1000);
+    got.forEach(f => samples.push({ f, t: [tx, ty], g: i }));
+  }
+  if (S.abortCalib) return endCalibration(false);
+  const perPoint = pts.map((_, i) => samples.filter(s => s.g === i).length);
+  if (perPoint.filter(n => n >= 6).length < pts.length - 1) {
+    showCalib("Not enough data", "Your face wasn't visible (or you blinked) for too many points. Check the lighting and that your whole face is in the camera preview, then try again.", true);
+    S.calibrating = false; return;
+  }
+  $("#calibProgress").textContent = "Fitting…"; await sleep(30);
+  const fit = trainWithCV(samples, pts.length);
+  S.model = fit.model; S.bias = [0, 0];
+
+  // validation on points the model hasn't seen
+  cdot.classList.add("val");
+  const vpts = [[0.25, 0.25], [0.75, 0.25], [0.5, 0.5], [0.25, 0.75], [0.75, 0.75]];
+  const res = [];
+  for (let i = 0; i < vpts.length && !S.abortCalib; i++) {
+    const tx = vpts[i][0] * VW, ty = vpts[i][1] * VH;
+    $("#calibProgress").textContent = `Checking accuracy ${i + 1} of ${vpts.length}`;
+    moveDot(tx, ty); await sleep(750);
+    const got = await collect(900);
+    if (got.length < 5) continue;
+    const preds = got.map(f => predict(S.model, f));
+    const mx = preds.reduce((a, p) => a + p[0], 0) / preds.length, my = preds.reduce((a, p) => a + p[1], 0) / preds.length;
+    const jit = Math.sqrt(preds.reduce((a, p) => a + (p[0] - mx) ** 2 + (p[1] - my) ** 2, 0) / preds.length);
+    res.push({ tx, ty, mx, my, jit });
+  }
+  if (S.abortCalib) return endCalibration(false);
+  if (res.length >= 3) {
+    const bx = res.reduce((a, r) => a + (r.tx - r.mx), 0) / res.length, by = res.reduce((a, r) => a + (r.ty - r.my), 0) / res.length;
+    S.bias = [bx, by];
+    const errRaw = res.reduce((a, r) => a + Math.hypot(r.tx - r.mx, r.ty - r.my), 0) / res.length;
+    const errY = Math.sqrt(res.reduce((a, r) => a + (r.ty - r.my - by) ** 2, 0) / res.length);
+    const jit = res.reduce((a, r) => a + r.jit, 0) / res.length;
+    S.sigma = clamp(Math.hypot(errY, jit * 0.5), 30, 200);
+    S.precision = jit;
+    const deg = errRaw / (COARSE ? 33 : 40); // rough: ~40 CSS px/° for a laptop at ~60 cm, ~33 for a phone at ~30 cm
+    $("#mAcc").textContent = `±${Math.round(errRaw)} px (~${deg.toFixed(1)}°)`;
+    $("#mPrec").textContent = `±${Math.round(jit)} px raw`;
+  } else {
+    $("#mAcc").textContent = `±${Math.round(fit.cvErr)} px (est.)`;
+  }
+  const F = S.feat;
+  S.calibRef = F ? { scale: F.scale, px: F.px, py: F.py } : null;
+  S.calibVW = VW; S.calibVH = VH;
+  endCalibration(true);
+}
+function endCalibration(ok) {
+  S.calibrating = false; S.collecting = null;
+  $("#calib").classList.remove("show"); cdot.style.display = "none";
+  if (ok) { S.calibrated = true; makeFilters(); $("#btnDrift").disabled = false; heat.resize(); reader.relayout(false); $("#moveChip").style.display = "none"; $("#moveChip").dataset.reason = ""; }
+  setStatus(S.calibrated ? "ok" : "warn", S.calibrated ? "Tracking" : "Camera on — calibrate to start tracking");
+}
+
+async function driftFix() {
+  if (!S.calibrated || S.calibrating) return;
+  S.calibrating = true;
+  $("#calib").classList.add("show"); $("#calibMsg").style.display = "none";
+  $("#calibProgress").style.display = "block"; $("#calibProgress").textContent = "Drift fix: look at the dot";
+  cdot.classList.remove("val"); cdot.style.display = "block";
+  const tx = innerWidth / 2, ty = innerHeight / 2;
+  moveDot(tx, ty); await sleep(800);
+  const got = await collect(1100);
+  if (got.length >= 6 && !S.abortCalib) {
+    const preds = got.map(f => predict(S.model, f));
+    const mx = preds.reduce((a, p) => a + p[0], 0) / preds.length, my = preds.reduce((a, p) => a + p[1], 0) / preds.length;
+    S.bias = [tx - mx, ty - my];
+    const F = S.feat; if (F) S.calibRef = { scale: F.scale, px: F.px, py: F.py };
+  }
+  S.calibrating = false; S.abortCalib = false;
+  $("#calib").classList.remove("show"); cdot.style.display = "none"; $("#moveChip").style.display = "none";
+}
+$("#btnDrift").onclick = driftFix;
+
+/* ---------------- UI wiring ---------------- */
+function setMode(m) {
+  S.mode = m;
+  $("#tabFree").classList.toggle("on", m === "free"); $("#tabRead").classList.toggle("on", m === "reading");
+  $("#freeView").style.display = m === "free" ? "grid" : "none";
+  $("#readView").style.display = m === "reading" ? "block" : "none";
+  if (m === "reading") reader.relayout(false); else reader.render();
+  session.renderStats();
+}
+$("#tabFree").onclick = () => setMode("free");
+$("#tabRead").onclick = () => setMode("reading");
+$("#optDot").onchange = e => { prefs.dot = e.target.checked; if (!prefs.dot) dotEl.style.display = "none"; };
+$("#optHeat").onchange = e => { prefs.heat = e.target.checked; heat.show(prefs.heat); };
+$("#optDrift").onchange = e => { prefs.drift = e.target.checked; };
+$("#optSmooth").oninput = e => { prefs.smooth = +e.target.value; makeFilters(); };
+$("#btnClearHeat").onclick = () => heat.clear();
+$("#btnReset").onclick = () => session.reset();
+$("#btnCsv").onclick = () => {
+  const data = session.csv(); if (!data) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([data], { type: "text/csv" }));
+  a.download = "gaze-session-" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-") + ".csv";
+  document.body.appendChild(a); a.click(); a.remove();
+};
+addEventListener("keydown", e => {
+  if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT" && e.target.type === "text") return;
+  const k = e.key.toLowerCase();
+  if (k === "escape") { if (S.calibrating) S.abortCalib = true; else $("#calib").classList.remove("show"); }
+  else if (k === "c") openCalibration();
+  else if (k === "d") driftFix();
+  else if (k === "g") { $("#optDot").click(); }
+  else if (k === "h") { $("#optHeat").click(); }
+});
+let resizeT = 0;
+addEventListener("resize", () => {
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => {
+    heat.resize(); reader.relayout(false);
+    if (S.calibrated && !S.calibrating && (Math.abs(innerWidth - S.calibVW) > 20 || Math.abs(innerHeight - S.calibVH) > 20)) {
+      const chip = $("#moveChip"); chip.dataset.reason = "resize";
+      chip.textContent = "Window size changed — recalibrate (C)"; chip.style.display = "inline-block";
+    }
+  }, 200);
+});
+
+setText(PASSAGES[0].title, PASSAGES[0].text);
+setMode("free");
+</script>
+</body>
+</html>
