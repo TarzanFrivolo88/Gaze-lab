@@ -88,6 +88,10 @@
         display:none;transition:transform .38s cubic-bezier(.3,.7,.3,1);box-shadow:0 0 0 6px rgba(110,168,255,.18)}
   #cdot::after{content:"";position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px;border-radius:50%;background:#0b1020}
   #cdot.collect{animation:shrink 1s linear forwards}
+  #cword{position:fixed;left:0;top:0;display:none;font:600 18px/1 system-ui,sans-serif;color:#fff;padding:7px 11px;border-radius:7px;
+         background:rgba(110,168,255,.16);border:1px solid rgba(110,168,255,.5);white-space:nowrap;transition:background .15s}
+  #cword.show{display:block}
+  #cword.ok{background:rgba(76,195,138,.45);border-color:var(--good)}
   #cdot.val{background:var(--good);box-shadow:0 0 0 6px rgba(76,195,138,.18)}
   @keyframes shrink{to{width:14px;height:14px;margin:-7px 0 0 -7px}}
   #btnStats{display:none}
@@ -163,7 +167,12 @@
   <div class="kv small">
     <span>Accuracy</span><span id="mAcc">not calibrated</span>
     <span>Precision (jitter)</span><span id="mPrec">–</span>
+    <span>Data used</span><span id="mKept">–</span>
   </div>
+  <label class="opt small">Confirm targets by
+    <select id="optConfirm"><option value="speech">Saying the word</option><option value="voice">Voice detection (private)</option><option value="tap">Tap / Space</option><option value="dots">Dots only</option></select></label>
+  <label class="opt small">Word language
+    <select id="optLang"><option value="en-US">English</option><option value="es-ES">Español</option></select></label>
 
   <h3>Focus</h3>
   <div class="row" style="align-items:baseline;gap:6px"><span class="big" id="mFocus">–</span><span class="muted small" id="mFocusLbl">on screen</span></div>
@@ -233,6 +242,7 @@
     </div>
   </div>
   <div id="cdot"></div>
+  <div id="cword"></div>
   <div id="calibProgress"></div>
 </div>
 
@@ -302,7 +312,7 @@ function predict(model, f) {
   const { mean, std, W } = model;
   let x = W[0][0], y = W[0][1];
   for (let j = 0; j < f.length; j++) {
-    const z = std[j] > 1e-9 ? (f[j] - mean[j]) / std[j] : 0;
+    const z = std[j] > 1e-9 ? clamp((f[j] - mean[j]) / std[j], -5, 5) : 0;
     x += z * W[j + 1][0]; y += z * W[j + 1][1];
   }
   return [x, y];
@@ -411,6 +421,7 @@ $("#camSel").onchange = async e => {
 let wakeLock = null;
 async function keepAwake() { try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { } }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.landmarker) keepAwake(); });
+addEventListener("deviceorientation", e => { if (e.beta != null) S.tilt = [e.beta, e.gamma]; });
 $("#btnStats").onclick = () => document.body.classList.toggle("panel-open");
 
 function setStatus(kind, text) {
@@ -487,7 +498,7 @@ function onFrame(res, t) {
   }
   S.blink = blink;
 
-  if (S.collecting && F && !blink) S.collecting.push(F.f.slice());
+  if (S.collecting && F && !blink) S.collecting.push({ t, f: F.f.slice() });
 
   if (!S.calibrated || S.calibrating) { session.frame(t, F, null); return; }
 
@@ -517,7 +528,8 @@ function checkMovement(F) {
   if (!S.calibRef) return;
   const ds = Math.abs(F.scale - S.calibRef.scale) / S.calibRef.scale;
   const dp = Math.hypot(F.px - S.calibRef.px, F.py - S.calibRef.py);
-  const moved = ds > 0.16 || dp > 0.12;
+  const dt = S.tilt && S.calibRef.tilt ? Math.max(Math.abs(S.tilt[0] - S.calibRef.tilt[0]), Math.abs(S.tilt[1] - S.calibRef.tilt[1])) : 0;
+  const moved = ds > 0.16 || dp > 0.12 || dt > 6;
   moveTimer = moved ? moveTimer + 1 : 0;
   const chip = $("#moveChip");
   if (moveTimer > 30) { chip.textContent = "You moved — press D or recalibrate"; chip.style.display = "inline-block"; }
@@ -844,127 +856,354 @@ const session = (() => {
 })();
 
 /* ---------------- calibration ---------------- */
+const WORDS = {
+  en: ["apple", "river", "cloud", "stone", "tiger", "lemon", "chair", "green", "house", "piano", "robot", "sugar", "train", "water", "zebra", "candle", "mirror", "pencil", "garden", "rocket",
+       "window", "bread", "horse", "music", "ocean", "paper", "queen", "smile", "table", "yellow", "banana", "forest", "guitar", "planet", "silver", "winter", "orange", "dragon", "camera", "bottle"],
+  es: ["casa", "perro", "gato", "mesa", "silla", "luna", "nube", "pera", "libro", "agua", "fuego", "playa", "árbol", "flor", "coche", "tren", "barco", "queso", "leche", "mano",
+       "verde", "rojo", "azul", "reloj", "llave", "piedra", "campo", "calle", "plaza", "sopa", "cielo", "viento", "nieve", "fresa", "limón", "pato", "burro", "lobo", "toro", "rana"],
+};
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const median = a => { const b = [...a].sort((x, y) => x - y), m = b.length >> 1; return b.length ? (b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2) : 0; };
+const normWord = s => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9 ]/g, " ").trim();
+function lev(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...new Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+function saidWord(transcript, word) {
+  const w = normWord(word);
+  return normWord(transcript).split(/\s+/).some(t => t === w || (w.length >= 4 && lev(t, w) <= 1));
+}
+
+// --- ways of confirming that you looked at the word ---
+function makeSpeechConfirmer(lang) {
+  const rec = new SR();
+  rec.lang = lang; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 5;
+  let active = true, waiting = null, fatal = null;
+  rec.onresult = e => {
+    if (!waiting) return;
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      for (let a = 0; a < r.length; a++) if (saidWord(r[a].transcript, waiting.word)) { const w = waiting; waiting = null; w.resolve({ t: performance.now() }); return; }
+    }
+  };
+  rec.onerror = e => {
+    if (["not-allowed", "service-not-allowed", "language-not-supported", "audio-capture"].includes(e.error)) {
+      fatal = e.error; if (waiting) { const w = waiting; waiting = null; w.resolve({ error: e.error }); }
+    }
+  };
+  rec.onend = () => { if (active && !fatal) { try { rec.start(); } catch (_) { } } };
+  return {
+    where: "Google's servers",
+    async init() {
+      try {
+        if ("processLocally" in rec && SR.available) {
+          const st = await SR.available({ langs: [lang], processLocally: true });
+          if (st === "available") { rec.processLocally = true; this.where = "this device"; }
+        }
+      } catch (_) { }
+      rec.start();
+    },
+    waitFor(word, timeout) {
+      return new Promise(res => {
+        waiting = { word, resolve: res };
+        setTimeout(() => { if (waiting && waiting.resolve === res) { waiting = null; res(null); } }, timeout);
+      });
+    },
+    stop() { active = false; try { rec.abort(); } catch (_) { } },
+  };
+}
+function makeVoiceConfirmer() {
+  // Local voice-activity detection: only the timing of your voice is used, nothing is recorded or sent.
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  let stream, an, buf, timer, floor = 0.004, loudRun = 0, quietRun = 0, waiting = null;
+  return {
+    where: "this device",
+    async init() {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } });
+      const src = ctx.createMediaStreamSource(stream);
+      an = ctx.createAnalyser(); an.fftSize = 1024; buf = new Float32Array(an.fftSize); src.connect(an);
+      if (ctx.state === "suspended") await ctx.resume();
+      timer = setInterval(() => {
+        an.getFloatTimeDomainData(buf);
+        let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+        const rms = Math.sqrt(s / buf.length);
+        const loud = rms > Math.max(0.012, floor * 4);
+        if (loud) { loudRun++; quietRun = 0; } else { loudRun = 0; quietRun++; floor += 0.05 * (rms - floor); }
+        if (!waiting) return;
+        if (!waiting.armed && quietRun >= 8) waiting.armed = true;           // you were silent after the word appeared
+        if (waiting.armed && loudRun >= 4 && performance.now() - waiting.t0 > 300) { // ~80 ms of voice
+          const w = waiting; waiting = null; w.resolve({ t: performance.now() - 80 });
+        }
+      }, 20);
+    },
+    waitFor(word, timeout) {
+      return new Promise(res => {
+        waiting = { resolve: res, armed: false, t0: performance.now() };
+        setTimeout(() => { if (waiting && waiting.resolve === res) { waiting = null; res(null); } }, timeout);
+      });
+    },
+    stop() { clearInterval(timer); if (stream) stream.getTracks().forEach(t => t.stop()); try { ctx.close(); } catch (_) { } },
+  };
+}
+function makeTapConfirmer() {
+  let waiting = null;
+  const h = e => {
+    if (!waiting) return;
+    if (e.type === "keydown" && e.code !== "Space" && e.key !== " ") return;
+    e.preventDefault(); const w = waiting; waiting = null; w.resolve({ t: performance.now() });
+  };
+  return {
+    where: "",
+    async init() { addEventListener("keydown", h, true); $("#calib").addEventListener("pointerdown", h); },
+    waitFor(word, timeout) {
+      return new Promise(res => {
+        waiting = { resolve: res };
+        setTimeout(() => { if (waiting && waiting.resolve === res) { waiting = null; res(null); } }, timeout);
+      });
+    },
+    stop() { removeEventListener("keydown", h, true); $("#calib").removeEventListener("pointerdown", h); },
+  };
+}
+function makeConfirmer(mode, lang) {
+  if (mode === "speech") return SR ? makeSpeechConfirmer(lang) : null;
+  if (mode === "voice") return makeVoiceConfirmer();
+  if (mode === "tap") return makeTapConfirmer();
+  return null;
+}
+
 function calibPoints(n) {
   const m = 0.07, g3 = [m, 0.5, 1 - m];
   let pts = [];
   if (n === 16) { const g4 = [m, 0.36, 0.64, 1 - m]; for (const y of g4) for (const x of g4) pts.push([x, y]); }
   else { for (const y of g3) for (const x of g3) pts.push([x, y]); if (n === 13) pts.push([0.28, 0.28], [0.72, 0.28], [0.28, 0.72], [0.72, 0.72]); }
-  // centre (or nearest to it) first, rest shuffled
   pts.sort((a, b) => Math.hypot(a[0] - .5, a[1] - .5) - Math.hypot(b[0] - .5, b[1] - .5));
   const first = pts.shift();
   for (let i = pts.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pts[i], pts[j]] = [pts[j], pts[i]]; }
   return [first, ...pts];
 }
-const cdot = $("#cdot");
+const cdot = $("#cdot"), cword = $("#cword");
 function moveDot(x, y) { cdot.style.transform = `translate(${x}px,${y}px)`; }
-async function collect(ms) {
+function abortable(p) { return Promise.race([p, new Promise(r => { S.cancelWait = () => r(null); })]); }
+
+// Show one target and return the gaze features recorded while you were (confirmed to be) looking at it.
+async function presentTarget(tx, ty, mode, conf, nextWord) {
+  cword.className = ""; cdot.className = ""; cdot.style.display = "block";
+  moveDot(tx, ty);
+  await sleep(450);
+  if (S.abortCalib) return null;
+  if (mode === "dots") {
+    await sleep(300);
+    S.collecting = [];
+    cdot.classList.add("collect");
+    await sleep(1000);
+    const got = S.collecting; S.collecting = null; cdot.classList.remove("collect");
+    return got.map(s => s.f);
+  }
+  const word = nextWord();
+  cword.textContent = word;
+  cword.style.transform = `translate(${tx}px,${ty}px) translate(-50%,-50%)`;
+  cdot.style.display = "none"; cword.className = "show";
+  const tShow = performance.now();
   S.collecting = [];
-  cdot.classList.remove("collect"); void cdot.offsetWidth; cdot.classList.add("collect");
-  await sleep(ms);
-  const out = S.collecting; S.collecting = null; cdot.classList.remove("collect");
+  const r = await abortable(conf.waitFor(word, 8000));
+  let all = S.collecting;
+  if (!r || r.error) { S.collecting = null; cword.className = ""; return r && r.error ? { error: r.error } : null; }
+  let tEnd = mode === "speech" ? r.t : r.t + 250;          // with voice/tap, the eyes stay on the word while you say it
+  tEnd = Math.max(tEnd, tShow + 1350);                     // and the word stays until there's ~1 s of gaze data
+  const wait = tEnd - performance.now(); if (wait > 0) await sleep(wait);
+  cword.className = "show ok";
+  all = S.collecting; S.collecting = null;
+  await sleep(180); cword.className = "";
+  const lo = Math.max(tShow + 350, tEnd - 1500);
+  return all.filter(s => s.t >= lo && s.t <= tEnd).map(s => s.f);
+}
+
+// Drop frames where the eyes were clearly somewhere else (robust to glances away from the target).
+// Decisions use a 5-frame running median, because single webcam frames are too noisy to judge.
+function trimPoint(fs) {
+  if (!fs || fs.length < 6) return fs || [];
+  const K = [0, 1, 2, 3], n = fs.length;
+  const sm = fs.map((_, i) => K.map(k => median(fs.slice(Math.max(0, i - 2), Math.min(n, i + 3)).map(f => f[k]))));
+  const med = K.map((_, j) => median(sm.map(v => v[j])));
+  const mad = K.map((_, j) => median(sm.map(v => Math.abs(v[j] - med[j]))) * 1.4826 + 1e-6);
+  const d = sm.map(v => Math.max(...v.map((x, j) => Math.abs(x - med[j]) / mad[j])));
+  const keep = fs.filter((_, i) => d[i] < 3);
+  return keep.length >= 4 ? keep : fs;
+}
+// Summarise a point as a few robust (median) feature vectors: averages out camera noise, which would
+// otherwise bias the fit towards the centre of the screen.
+function summarise(fs, chunks = 3) {
+  const out = [], size = Math.ceil(fs.length / chunks);
+  for (let c = 0; c < fs.length; c += size) {
+    const part = fs.slice(c, c + size); if (part.length < 2) continue;
+    out.push(part[0].map((_, j) => median(part.map(f => f[j]))));
+  }
   return out;
 }
+// Fit, then refit without samples the model can't explain (whole glances or mis-read targets).
+function robustTrain(samples, nGroups) {
+  let fit = trainWithCV(samples, nGroups);
+  for (let it = 0; it < 2; it++) {
+    const res = samples.map(s => { const p = predict(fit.model, s.f); return Math.hypot(p[0] - s.t[0], p[1] - s.t[1]); });
+    const lim = Math.max(3 * median(res), 40);
+    const keep = samples.filter((_, i) => res[i] <= lim);
+    if (keep.length === samples.length || keep.length < samples.length * 0.6) break;
+    samples = keep; fit = trainWithCV(samples, nGroups);
+  }
+  fit.kept = samples.length;
+  return fit;
+}
+
+const MODE_TEXT = {
+  speech: "Each dot turns into a word. Read it out loud: a point only counts once the word is recognised. Speech recognition is Chrome's own; on Android it sends each word's audio to Google. Pick “Voice detection” in Stats to keep everything on the device.",
+  voice: "Each dot turns into a word. Say it out loud as soon as you've read it. Only the timing of your voice is used: nothing is recorded or sent anywhere.",
+  tap: "Each dot turns into a word. Press Space (or tap the screen) the moment you've read it.",
+  dots: "Look straight at each dot until it shrinks and moves on. Try to keep your head still.",
+};
 function showCalib(title, text, buttons) {
   $("#calibTitle").textContent = title; $("#calibText").textContent = text;
   $("#calibMsg").style.display = "block"; $("#calibBtns").style.display = buttons ? "flex" : "none";
-  cdot.style.display = "none"; $("#calibProgress").style.display = "none";
+  cdot.style.display = "none"; cword.className = ""; $("#calibProgress").style.display = "none";
 }
-
 function openCalibration() {
   if (!S.landmarker || S.calibrating) return;
   document.body.classList.remove("panel-open");
   $("#calib").classList.add("show");
-  showCalib("Calibration", "Look straight at each dot until it shrinks and moves on. Follow it with your eyes, and try to keep your head still. Press Esc to cancel.", true);
+  showCalib("Calibration", MODE_TEXT[$("#optConfirm").value] + " Press Esc to cancel.", true);
 }
 $("#btnCalib").onclick = openCalibration;
 $("#btnCalibCancel").onclick = () => { $("#calib").classList.remove("show"); };
 $("#btnCalibGo").onclick = () => runCalibration();
 
+async function startConfirmer(mode) {
+  let conf = null;
+  try { conf = makeConfirmer(mode, $("#optLang").value); } catch (e) { console.warn(e); }
+  if (mode !== "dots" && !conf) return { error: "This browser has no speech recognition. Choose “Voice detection” or “Tap / Space” under Calibration in Stats." };
+  if (conf) {
+    try { await conf.init(); }
+    catch (e) { console.warn(e); try { conf.stop(); } catch (_) { } return { error: "Couldn't use the microphone. Allow microphone access, or choose “Tap / Space” or “Dots” under Calibration in Stats." }; }
+  }
+  return { conf };
+}
+function wordSource() {
+  const list = [...WORDS[$("#optLang").value.slice(0, 2)] || WORDS.en];
+  for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j], list[i]]; }
+  let k = 0; return () => list[k++ % list.length];
+}
+
 async function runCalibration() {
-  if ($("#optFs").checked && !document.fullscreenElement) { try { await document.documentElement.requestFullscreen(); } catch (e) { } await sleep(600); }
+  const mode = $("#optConfirm").value;
+  // anything that needs the click (audio, fullscreen) starts before the first await
+  const started = startConfirmer(mode);
+  if ($("#optFs").checked && !document.fullscreenElement) { try { await document.documentElement.requestFullscreen(); } catch (e) { } }
+  const { conf, error } = await started;
+  if (error) { showCalib("Can't start", error, true); return; }
+  await sleep(500);
   S.calibrating = true; S.abortCalib = false;
   $("#calibMsg").style.display = "none"; $("#calibProgress").style.display = "block";
-  cdot.classList.remove("val"); cdot.style.display = "block";
+  const hint = mode === "dots" ? "" : mode === "tap" ? " — press Space or tap when you've read the word" : ` — say the word${conf.where ? " · recognition on " + conf.where : ""}`;
   const VW = innerWidth, VH = innerHeight;
   const pts = calibPoints(+$("#optPts").value);
+  const nextWord = wordSource();
   const samples = [];
-  moveDot(VW / 2, VH / 2); await sleep(400);
-  for (let i = 0; i < pts.length && !S.abortCalib; i++) {
-    const tx = pts[i][0] * VW, ty = pts[i][1] * VH;
-    $("#calibProgress").textContent = `Point ${i + 1} of ${pts.length}`;
-    moveDot(tx, ty); await sleep(i === 0 ? 1000 : 750);
-    const got = await collect(1000);
-    got.forEach(f => samples.push({ f, t: [tx, ty], g: i }));
-  }
-  if (S.abortCalib) return endCalibration(false);
-  const perPoint = pts.map((_, i) => samples.filter(s => s.g === i).length);
-  if (perPoint.filter(n => n >= 6).length < pts.length - 1) {
-    showCalib("Not enough data", "Your face wasn't visible (or you blinked) for too many points. Check the lighting and that your whole face is in the camera preview, then try again.", true);
-    S.calibrating = false; return;
-  }
-  $("#calibProgress").textContent = "Fitting…"; await sleep(30);
-  const fit = trainWithCV(samples, pts.length);
-  S.model = fit.model; S.bias = [0, 0];
+  let fatal = null;
+  try {
+    for (let i = 0; i < pts.length && !S.abortCalib && !fatal; i++) {
+      const tx = pts[i][0] * VW, ty = pts[i][1] * VH;
+      $("#calibProgress").textContent = `Point ${i + 1} of ${pts.length}${hint}`;
+      let fs = await presentTarget(tx, ty, mode, conf, nextWord);
+      if (fs && fs.error) { fatal = fs.error; break; }
+      if (!S.abortCalib && (!fs || fs.length < 6)) {                 // missed: one more try with a new word
+        $("#calibProgress").textContent = `Point ${i + 1} of ${pts.length} — once more${hint}`;
+        fs = await presentTarget(tx, ty, mode, conf, nextWord);
+        if (fs && fs.error) { fatal = fs.error; break; }
+      }
+      if (fs && fs.length >= 6) summarise(trimPoint(fs)).forEach(f => samples.push({ f, t: [tx, ty], g: i }));
+    }
+    if (fatal) { showCalib("Microphone problem", `Speech recognition stopped (${fatal}). Allow the microphone, or pick another confirmation method under Calibration in Stats.`, true); S.calibrating = false; return; }
+    if (S.abortCalib) return endCalibration(false);
+    const groups = new Set(samples.map(s => s.g));
+    if (groups.size < Math.max(6, pts.length - 3)) {
+      showCalib("Not enough points", `Only ${groups.size} of ${pts.length} points were confirmed. Check that your face is lit and fully in the camera preview${mode === "speech" ? ", and that the word language matches how you're reading" : ""}, then try again.`, true);
+      S.calibrating = false; return;
+    }
+    $("#calibProgress").textContent = "Fitting…"; await sleep(30);
+    const fit = robustTrain(samples, pts.length);
+    S.model = fit.model; S.bias = [0, 0];
 
-  // validation on points the model hasn't seen
-  cdot.classList.add("val");
-  const vpts = [[0.25, 0.25], [0.75, 0.25], [0.5, 0.5], [0.25, 0.75], [0.75, 0.75]];
-  const res = [];
-  for (let i = 0; i < vpts.length && !S.abortCalib; i++) {
-    const tx = vpts[i][0] * VW, ty = vpts[i][1] * VH;
-    $("#calibProgress").textContent = `Checking accuracy ${i + 1} of ${vpts.length}`;
-    moveDot(tx, ty); await sleep(750);
-    const got = await collect(900);
-    if (got.length < 5) continue;
-    const preds = got.map(f => predict(S.model, f));
-    const mx = preds.reduce((a, p) => a + p[0], 0) / preds.length, my = preds.reduce((a, p) => a + p[1], 0) / preds.length;
-    const jit = Math.sqrt(preds.reduce((a, p) => a + (p[0] - mx) ** 2 + (p[1] - my) ** 2, 0) / preds.length);
-    res.push({ tx, ty, mx, my, jit });
+    // validation on new positions
+    const vpts = [[0.25, 0.25], [0.75, 0.25], [0.5, 0.5], [0.25, 0.75], [0.75, 0.75]];
+    const res = [];
+    for (let i = 0; i < vpts.length && !S.abortCalib && !fatal; i++) {
+      const tx = vpts[i][0] * VW, ty = vpts[i][1] * VH;
+      $("#calibProgress").textContent = `Checking accuracy ${i + 1} of ${vpts.length}${hint}`;
+      cdot.classList.add("val");
+      const fs = await presentTarget(tx, ty, mode, conf, nextWord);
+      if (fs && fs.error) { fatal = fs.error; break; }
+      if (!fs || fs.length < 5) continue;
+      const preds = trimPoint(fs).map(f => predict(S.model, f));
+      const mx = median(preds.map(p => p[0])), my = median(preds.map(p => p[1]));
+      const jit = Math.sqrt(preds.reduce((a, p) => a + (p[0] - mx) ** 2 + (p[1] - my) ** 2, 0) / preds.length);
+      res.push({ tx, ty, mx, my, jit });
+    }
+    if (S.abortCalib) return endCalibration(false);
+    if (res.length >= 3) {
+      const bx = median(res.map(r => r.tx - r.mx)), by = median(res.map(r => r.ty - r.my));
+      S.bias = [bx, by];
+      const errRaw = res.reduce((a, r) => a + Math.hypot(r.tx - r.mx, r.ty - r.my), 0) / res.length;
+      const errY = Math.sqrt(res.reduce((a, r) => a + (r.ty - r.my - by) ** 2, 0) / res.length);
+      const jit = res.reduce((a, r) => a + r.jit, 0) / res.length;
+      S.sigma = clamp(Math.hypot(errY, jit * 0.5), 30, 200);
+      S.precision = jit;
+      const deg = errRaw / (COARSE ? 33 : 40); // rough: ~40 CSS px/° for a laptop at ~60 cm, ~33 for a phone at ~30 cm
+      $("#mAcc").textContent = `±${Math.round(errRaw)} px (~${deg.toFixed(1)}°)`;
+      $("#mPrec").textContent = `±${Math.round(jit)} px raw`;
+    } else {
+      $("#mAcc").textContent = `±${Math.round(fit.cvErr)} px (est.)`;
+    }
+    $("#mKept").textContent = `${groups.size}/${pts.length} points, ${Math.round(100 * fit.kept / samples.length)}% of frames`;
+    const F = S.feat;
+    S.calibRef = F ? { scale: F.scale, px: F.px, py: F.py, tilt: S.tilt ? [...S.tilt] : null } : null;
+    S.calibVW = VW; S.calibVH = VH;
+    endCalibration(true);
+  } finally {
+    if (conf) conf.stop();
+    cdot.classList.remove("val");
   }
-  if (S.abortCalib) return endCalibration(false);
-  if (res.length >= 3) {
-    const bx = res.reduce((a, r) => a + (r.tx - r.mx), 0) / res.length, by = res.reduce((a, r) => a + (r.ty - r.my), 0) / res.length;
-    S.bias = [bx, by];
-    const errRaw = res.reduce((a, r) => a + Math.hypot(r.tx - r.mx, r.ty - r.my), 0) / res.length;
-    const errY = Math.sqrt(res.reduce((a, r) => a + (r.ty - r.my - by) ** 2, 0) / res.length);
-    const jit = res.reduce((a, r) => a + r.jit, 0) / res.length;
-    S.sigma = clamp(Math.hypot(errY, jit * 0.5), 30, 200);
-    S.precision = jit;
-    const deg = errRaw / (COARSE ? 33 : 40); // rough: ~40 CSS px/° for a laptop at ~60 cm, ~33 for a phone at ~30 cm
-    $("#mAcc").textContent = `±${Math.round(errRaw)} px (~${deg.toFixed(1)}°)`;
-    $("#mPrec").textContent = `±${Math.round(jit)} px raw`;
-  } else {
-    $("#mAcc").textContent = `±${Math.round(fit.cvErr)} px (est.)`;
-  }
-  const F = S.feat;
-  S.calibRef = F ? { scale: F.scale, px: F.px, py: F.py } : null;
-  S.calibVW = VW; S.calibVH = VH;
-  endCalibration(true);
 }
 function endCalibration(ok) {
   S.calibrating = false; S.collecting = null;
-  $("#calib").classList.remove("show"); cdot.style.display = "none";
+  $("#calib").classList.remove("show"); cdot.style.display = "none"; cword.className = "";
   if (ok) { S.calibrated = true; makeFilters(); $("#btnDrift").disabled = false; heat.resize(); reader.relayout(false); $("#moveChip").style.display = "none"; $("#moveChip").dataset.reason = ""; }
   setStatus(S.calibrated ? "ok" : "warn", S.calibrated ? "Tracking" : "Camera on — calibrate to start tracking");
 }
 
 async function driftFix() {
   if (!S.calibrated || S.calibrating) return;
-  S.calibrating = true;
+  const mode = $("#optConfirm").value;
+  const started = startConfirmer(mode);
+  S.calibrating = true; S.abortCalib = false;
   $("#calib").classList.add("show"); $("#calibMsg").style.display = "none";
   $("#calibProgress").style.display = "block"; $("#calibProgress").textContent = "Drift fix: look at the dot";
-  cdot.classList.remove("val"); cdot.style.display = "block";
-  const tx = innerWidth / 2, ty = innerHeight / 2;
-  moveDot(tx, ty); await sleep(800);
-  const got = await collect(1100);
-  if (got.length >= 6 && !S.abortCalib) {
-    const preds = got.map(f => predict(S.model, f));
-    const mx = preds.reduce((a, p) => a + p[0], 0) / preds.length, my = preds.reduce((a, p) => a + p[1], 0) / preds.length;
-    S.bias = [tx - mx, ty - my];
-    const F = S.feat; if (F) S.calibRef = { scale: F.scale, px: F.px, py: F.py };
+  const { conf, error } = await started;
+  try {
+    if (!error) {
+      const tx = innerWidth / 2, ty = innerHeight / 2;
+      const fs = await presentTarget(tx, ty, mode, conf, wordSource());
+      if (fs && !fs.error && fs.length >= 6 && !S.abortCalib) {
+        const preds = trimPoint(fs).map(f => predict(S.model, f));
+        S.bias = [tx - median(preds.map(p => p[0])), ty - median(preds.map(p => p[1]))];
+        const F = S.feat; if (F) S.calibRef = { scale: F.scale, px: F.px, py: F.py, tilt: S.tilt ? [...S.tilt] : null };
+      }
+    }
+  } finally {
+    if (conf) conf.stop();
+    S.calibrating = false; S.abortCalib = false;
+    $("#calib").classList.remove("show"); cdot.style.display = "none"; cword.className = ""; $("#moveChip").style.display = "none";
   }
-  S.calibrating = false; S.abortCalib = false;
-  $("#calib").classList.remove("show"); cdot.style.display = "none"; $("#moveChip").style.display = "none";
 }
 $("#btnDrift").onclick = driftFix;
 
@@ -995,7 +1234,7 @@ $("#btnCsv").onclick = () => {
 addEventListener("keydown", e => {
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT" && e.target.type === "text") return;
   const k = e.key.toLowerCase();
-  if (k === "escape") { if (S.calibrating) S.abortCalib = true; else $("#calib").classList.remove("show"); }
+  if (k === "escape") { if (S.calibrating) { S.abortCalib = true; if (S.cancelWait) S.cancelWait(); } else $("#calib").classList.remove("show"); }
   else if (k === "c") openCalibration();
   else if (k === "d") driftFix();
   else if (k === "g") { $("#optDot").click(); }
@@ -1015,6 +1254,8 @@ addEventListener("resize", () => {
 
 setText(PASSAGES[0].title, PASSAGES[0].text);
 setMode("free");
+if (!SR) $("#optConfirm").value = "voice";
+if ((navigator.language || "").toLowerCase().startsWith("es")) $("#optLang").value = "es-ES";
 </script>
 </body>
 </html>
