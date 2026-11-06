@@ -116,6 +116,7 @@
     .mobileOnly{display:list-item}
   }
   #calibProgress{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);color:var(--muted);font-size:13px;display:none;text-align:center;width:min(92vw,640px)}
+  #wave{position:fixed;left:50%;bottom:78px;transform:translateX(-50%);width:min(80vw,320px);height:48px;display:none;opacity:.9}
   #calibMic{display:none;color:#6c7389;margin-left:8px}
   #calibMic.loud{color:var(--good)}
   #micMeter{display:inline-block;width:70px;height:6px;border-radius:3px;background:#262a36;vertical-align:middle;margin-left:6px;position:relative;overflow:hidden}
@@ -177,7 +178,7 @@
     <span>Data used</span><span id="mKept">–</span>
   </div>
   <label class="opt small">Confirm targets by
-    <select id="optConfirm"><option value="speech">Saying the word</option><option value="voice">Voice detection (private)</option><option value="tap">Tap / Space</option><option value="dots">Dots only</option></select></label>
+    <select id="optConfirm"><option value="local" selected>Saying the word (on this device)</option><option value="speech">Saying the word (Chrome · Google)</option><option value="voice">Voice timing only</option><option value="tap">Tap / Space</option><option value="dots">Dots only</option></select></label>
   <label class="opt small">Word language
     <select id="optLang"><option value="en-US">English</option><option value="es-ES">Español</option></select></label>
 
@@ -244,12 +245,14 @@
   <div id="calibMsg">
     <h2 id="calibTitle">Calibration</h2>
     <p class="muted" id="calibText">Look straight at each dot until it shrinks and moves on. Follow it with your eyes, and try to keep your head still.</p>
+    <p id="micTest" class="small" style="min-height:1.3em;margin:10px 0 0"></p>
     <div class="row" style="justify-content:center;margin-top:14px" id="calibBtns">
       <button class="btn primary" id="btnCalibGo">Start</button><button class="btn" id="btnCalibCancel">Cancel</button>
     </div>
   </div>
   <div id="cdot"></div>
   <div id="cword"></div>
+  <canvas id="wave" width="640" height="96"></canvas>
   <div id="calibProgress"><span id="calibStep"></span> <span id="calibMic" title="listening">● listening <span id="micMeter"><span id="micBar"></span></span></span><div id="calibHeard"></div></div>
 </div>
 
@@ -866,10 +869,12 @@ const session = (() => {
 const WORDS = {
   en: ["apple", "river", "cloud", "stone", "tiger", "lemon", "chair", "green", "house", "piano", "robot", "sugar", "train", "water", "zebra", "candle", "mirror", "pencil", "garden", "rocket",
        "window", "bread", "horse", "music", "ocean", "paper", "queen", "smile", "table", "yellow", "banana", "forest", "guitar", "planet", "silver", "winter", "orange", "dragon", "camera", "bottle"],
-  es: ["casa", "perro", "gato", "mesa", "silla", "luna", "nube", "pera", "libro", "agua", "fuego", "playa", "árbol", "flor", "coche", "tren", "barco", "queso", "leche", "mano",
-       "verde", "rojo", "azul", "reloj", "llave", "piedra", "campo", "calle", "plaza", "sopa", "cielo", "viento", "nieve", "fresa", "limón", "pato", "burro", "lobo", "toro", "rana"],
+  es: ["mesa", "silla", "luna", "libro", "agua", "fuego", "playa", "árbol", "coche", "leche", "mano", "verde", "rojo", "azul", "reloj", "piedra", "campo", "plaza", "sopa", "viento",
+       "nieve", "fresa", "limón", "pato", "burro", "lobo", "toro", "rana", "caballo", "tomate", "pelota", "ventana", "zapato", "camisa", "naranja", "manzana", "montaña", "guitarra", "escuela", "botella",
+       "tortuga", "ratón", "jardín", "paloma", "cereza", "ballena", "cuchara"],
 };
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (window.__testWords) Object.assign(WORDS, window.__testWords); // test hook
 const median = a => { const b = [...a].sort((x, y) => x - y), m = b.length >> 1; return b.length ? (b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2) : 0; };
 const normWord = s => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9 ]/g, " ").trim();
 function lev(a, b) {
@@ -972,26 +977,22 @@ function makeVAD() {
 /*VAD-END*/
 function makeVoiceConfirmer() {
   // Local voice-activity detection: only the timing of your voice is used, nothing is recorded or sent.
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  let stream, an, buf, timer, waiting = null;
-  const vad = makeVAD();
+  let timer, waiting = null;
+  const vad = makeVAD(), buf = new Float32Array(1024);
   return {
     where: "this device",
     async init() {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      const src = ctx.createMediaStreamSource(stream);
-      an = ctx.createAnalyser(); an.fftSize = 1024; buf = new Float32Array(an.fftSize); src.connect(an);
-      if (ctx.state === "suspended") await ctx.resume();
+      const audio = await openMic();
       timer = setInterval(() => {
-        an.getFloatTimeDomainData(buf);
+        if (!audio.an) return;
+        audio.an.getFloatTimeDomainData(buf);
         let sq = 0; for (let i = 0; i < buf.length; i++) sq += buf[i] * buf[i];
-        const rms = Math.sqrt(sq / buf.length);
-        const v = vad.step(rms);
-        setListening(true, v.loud, rms / v.th);
+        const v = vad.step(Math.sqrt(sq / buf.length));
+        AUDIO.loud = v.loud;
         if (!waiting || !waiting.t0) return;
         if (!waiting.armed && v.quietRun >= 5) waiting.armed = true;             // silent for 0.1 s after the word appeared
         if (waiting.armed && v.loudRun >= 3 && performance.now() - waiting.t0 > 250) { // ~60 ms of voice
-          const w = waiting; waiting = null; w.res({ t: performance.now() - 60 });
+          const w = waiting; waiting = null; AUDIO.flash = performance.now(); w.res({ t: performance.now() - 60 });
         }
       }, 20);
     },
@@ -1004,7 +1005,113 @@ function makeVoiceConfirmer() {
         cancel() { if (waiting === me) { waiting = null; res(null); } },
       };
     },
-    stop() { clearInterval(timer); setListening(false); if (stream) stream.getTracks().forEach(t => t.stop()); try { ctx.close(); } catch (_) { } },
+    stop() { clearInterval(timer); AUDIO.loud = false; },
+  };
+}
+
+// ---- shared microphone: one stream feeds the waveform, the voice detector and the recogniser ----
+const AUDIO = { ctx: null, ready: null, an: null, stream: null, proc: null, listeners: new Set(), flash: 0, loud: false };
+function openMic() {
+  if (AUDIO.ready) return AUDIO.ready;
+  const ctx = AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)(); // created inside the click
+  AUDIO.ready = (async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    AUDIO.stream = stream;
+    if (ctx.state === "suspended") await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an); AUDIO.an = an;
+    const proc = ctx.createScriptProcessor(2048, 1, 1), mute = ctx.createGain(); mute.gain.value = 0;
+    src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+    proc.onaudioprocess = e => { for (const l of AUDIO.listeners) l(e.inputBuffer); };
+    AUDIO.proc = proc;
+    startWave();
+    return AUDIO;
+  })();
+  AUDIO.ready.catch(() => closeMic());
+  return AUDIO.ready;
+}
+function closeMic() {
+  if (AUDIO.stream) AUDIO.stream.getTracks().forEach(t => t.stop());
+  try { if (AUDIO.ctx) AUDIO.ctx.close(); } catch (_) { }
+  Object.assign(AUDIO, { ctx: null, ready: null, an: null, stream: null, proc: null, loud: false });
+  AUDIO.listeners.clear();
+}
+// scrolling waveform of what the mic picks up; turns green when a word is confirmed
+const waveHist = []; let waveOn = false;
+function startWave() {
+  if (waveOn) return; waveOn = true;
+  const cv = $("#wave"), g = cv.getContext("2d"), buf = new Float32Array(1024);
+  cv.style.display = "block";
+  const draw = () => {
+    if (!AUDIO.an) { waveOn = false; cv.style.display = "none"; waveHist.length = 0; return; }
+    requestAnimationFrame(draw);
+    AUDIO.an.getFloatTimeDomainData(buf);
+    let pk = 0; for (let i = 0; i < buf.length; i++) pk = Math.max(pk, Math.abs(buf[i]));
+    waveHist.push(pk); if (waveHist.length > 150) waveHist.shift();
+    const W = cv.width, H = cv.height, bw = W / 150, ok = performance.now() - AUDIO.flash < 600;
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = "#262a36"; g.fillRect(0, H / 2 - 0.5, W, 1);
+    g.fillStyle = ok ? "#4cc38a" : AUDIO.loud ? "#9cc2ff" : "#6ea8ff";
+    waveHist.forEach((v, i) => { const h = Math.max(2, Math.min(1, Math.sqrt(v) * 1.5) * H); g.fillRect(W - (waveHist.length - i) * bw, (H - h) / 2, Math.max(1, bw - 1), h); });
+  };
+  requestAnimationFrame(draw);
+}
+
+// ---- on-device speech recognition (Vosk, WebAssembly): limited to the calibration words, so it's fast ----
+const VOSK_MODELS = { en: "models/vosk-model-small-en-us-0.15.tar.gz", es: "models/vosk-model-small-es-0.3.tar.gz" };
+const VOSK_SIZE = { en: "41 MB", es: "34 MB" };
+let voskLibP = null; const voskModelP = {};
+const langKey = lang => (lang || "").slice(0, 2) === "es" ? "es" : "en";
+function loadVoskLib() {
+  if (window.Vosk) return Promise.resolve();
+  if (!voskLibP) voskLibP = new Promise((res, rej) => {
+    const sc = document.createElement("script"); sc.src = "vosk/vosk.js";
+    sc.onload = () => res(); sc.onerror = () => { voskLibP = null; rej(new Error("couldn't load the speech recogniser")); };
+    document.head.appendChild(sc);
+  });
+  return voskLibP;
+}
+function loadVoskModel(key) {
+  if (!voskModelP[key]) {
+    voskModelP[key] = (async () => { await loadVoskLib(); return await Vosk.createModel(VOSK_MODELS[key]); })();
+    voskModelP[key].catch(() => { delete voskModelP[key]; });
+  }
+  return voskModelP[key];
+}
+function makeLocalSpeechConfirmer(lang) {
+  const key = langKey(lang);
+  let rec = null, listener = null, waiting = null, lastShown = "";
+  const onText = txt => {
+    const words = txt.split(/\s+/).filter(w => w && w !== "[unk]");
+    if (waiting && waiting.t0 && words.some(w => normWord(w) === normWord(waiting.word))) {
+      const w = waiting; waiting = null;
+      AUDIO.flash = performance.now(); showHeard("✓ " + w.word, true);
+      try { if (navigator.vibrate) navigator.vibrate(25); } catch (_) { }
+      w.res({ t: performance.now() }); return;
+    }
+    const shown = words.slice(-3).join(" ");
+    if (shown && shown !== lastShown) { lastShown = shown; showHeard(shown, false); }
+  };
+  return {
+    where: "this device",
+    async init() {
+      const [model, audio] = await Promise.all([loadVoskModel(key), openMic()]);
+      rec = new model.KaldiRecognizer(audio.ctx.sampleRate, JSON.stringify([...WORDS[key], "[unk]"]));
+      rec.on("partialresult", m => onText((m.result && m.result.partial) || ""));
+      rec.on("result", m => { onText((m.result && m.result.text) || ""); lastShown = ""; });
+      listener = b => { try { rec.acceptWaveform(b); } catch (_) { } };
+      audio.listeners.add(listener);
+    },
+    begin(word, timeout) {
+      let res; const done = new Promise(r => res = r);
+      const me = { res, t0: 0, word }; waiting = me; lastShown = "";
+      return {
+        ready: Promise.resolve(), done,
+        reveal() { me.t0 = performance.now(); setTimeout(() => { if (waiting === me) { waiting = null; res(null); } }, timeout); },
+        cancel() { if (waiting === me) { waiting = null; res(null); } },
+      };
+    },
+    stop() { if (listener) AUDIO.listeners.delete(listener); try { if (rec) rec.remove(); } catch (_) { } },
   };
 }
 function makeTapConfirmer() {
@@ -1030,6 +1137,7 @@ function makeTapConfirmer() {
   };
 }
 function makeConfirmer(mode, lang) {
+  if (mode === "local") return makeLocalSpeechConfirmer(lang);
   if (mode === "speech") return SR ? makeSpeechConfirmer(lang) : null;
   if (mode === "voice") return makeVoiceConfirmer();
   if (mode === "tap") return makeTapConfirmer();
@@ -1085,6 +1193,7 @@ async function presentTarget(tx, ty, mode, conf, nextWord) {
   h.reveal();
   const r = await h.done;
   if (!r || r.error) { S.collecting = null; cword.className = ""; return r && r.error ? { error: r.error } : null; }
+  cword.className = "show ok";                             // instant feedback; keep looking at it for a moment
   let tEnd = mode === "speech" ? r.t : r.t + 200;          // with voice/tap the eyes stay on the word while you say it
   tEnd = Math.max(tEnd, tShow + 1000);                     // keep the word up until there's enough gaze data
   const wait = tEnd - performance.now(); if (wait > 0) await sleep(wait);
@@ -1132,6 +1241,7 @@ function robustTrain(samples, nGroups) {
 }
 
 const MODE_TEXT = {
+  local: "Each dot turns into a word. Say it out loud: it turns green the moment it's recognised. Recognition runs on this device; no audio is sent anywhere.",
   speech: "Each dot turns into a word. Read it out loud: a point only counts once the word is recognised. Speech recognition is Chrome's own; on Android it sends each word's audio to Google. Pick “Voice detection” in Stats to keep everything on the device.",
   voice: "Each dot turns into a word. Say it out loud as soon as you've read it. Only the timing of your voice is used: nothing is recorded or sent anywhere. The bar at the bottom shows your mic level; it turns green when it hears you.",
   tap: "Each dot turns into a word. Press Space (or tap the screen) the moment you've read it.",
@@ -1141,15 +1251,53 @@ function showCalib(title, text, buttons) {
   $("#calibTitle").textContent = title; $("#calibText").textContent = text;
   $("#calibMsg").style.display = "block"; $("#calibBtns").style.display = buttons ? "flex" : "none";
   cdot.style.display = "none"; cword.className = ""; $("#calibProgress").style.display = "none";
+  $("#micTest").textContent = "";
 }
 function openCalibration() {
   if (!S.landmarker || S.calibrating) return;
   document.body.classList.remove("panel-open");
   $("#calib").classList.add("show");
   showCalib("Calibration", MODE_TEXT[$("#optConfirm").value] + " Press Esc to cancel.", true);
+  prepareCalibration();
+}
+// Start the mic (and load the speech model) while you read the instructions, then run a mic test.
+async function prepareCalibration() {
+  cleanupPrep();
+  const mode = $("#optConfirm").value, lang = $("#optLang").value, key = langKey(lang);
+  const status = $("#micTest"); status.textContent = ""; status.style.color = "";
+  $("#btnCalibGo").disabled = false;
+  if (mode !== "local" && mode !== "voice") return;
+  $("#btnCalibGo").disabled = true;
+  const conf = makeConfirmer(mode, lang);
+  status.textContent = mode === "local" ? `Loading the speech model (${VOSK_SIZE[key]}, first time only)…` : "Starting the microphone…";
+  const p = conf.init().then(() => conf);
+  const prep = S.prep = { mode, lang, p, conf };
+  try { await p; }
+  catch (e) {
+    console.warn(e);
+    if (S.prep !== prep) return;
+    status.style.color = "var(--bad)";
+    status.textContent = "Couldn't start: " + (e && e.message || e) + (location.protocol === "file:" ? ". Open the GitHub Pages link instead of the file." : ". Check the microphone permission.");
+    S.prep = null; $("#btnCalibGo").disabled = false; return;
+  }
+  if (S.prep !== prep) return;
+  $("#btnCalibGo").disabled = false;
+  if (mode === "voice") { status.textContent = "Mic test: say anything. The bars below should jump."; return; }
+  const testWord = WORDS[key][0];
+  status.textContent = `Mic test: say “${testWord}”. It should turn green straight away.`;
+  const h = conf.begin(testWord, 120000); h.reveal(); prep.test = h;
+  const r = await h.done;
+  if (r && S.prep === prep) { status.style.color = "var(--good)"; status.textContent = `✓ Heard “${testWord}”. Press Start.`; showHeard(""); }
+}
+function cleanupPrep() {
+  if (!S.prep) return;
+  const prep = S.prep; S.prep = null;
+  if (prep.test) prep.test.cancel();
+  prep.p.then(c => c.stop(), () => { });
+  closeMic();
 }
 $("#btnCalib").onclick = openCalibration;
-$("#btnCalibCancel").onclick = () => { $("#calib").classList.remove("show"); };
+$("#btnCalibCancel").onclick = () => { cleanupPrep(); $("#calib").classList.remove("show"); };
 $("#btnCalibGo").onclick = () => runCalibration();
 
 async function startConfirmer(mode) {
@@ -1169,12 +1317,18 @@ function wordSource() {
 }
 
 async function runCalibration() {
-  const mode = $("#optConfirm").value;
-  // anything that needs the click (audio, fullscreen) starts before the first await
-  const started = startConfirmer(mode);
+  const mode = $("#optConfirm").value, lang = $("#optLang").value;
+  // reuse the mic/model prepared on the instructions screen; otherwise start them now (inside the click)
+  let started;
+  const prep = S.prep;
+  if (prep && prep.mode === mode && prep.lang === lang) {
+    if (prep.test) { prep.test.cancel(); prep.test = null; }
+    started = prep.p.then(conf => ({ conf }), e => ({ error: "Couldn't start the microphone: " + (e && e.message || e) }));
+  } else { cleanupPrep(); started = startConfirmer(mode); }
+  S.prep = null;
   if ($("#optFs").checked && !document.fullscreenElement) { try { await document.documentElement.requestFullscreen(); } catch (e) { } }
   const { conf, error } = await started;
-  if (error) { showCalib("Can't start", error, true); return; }
+  if (error) { closeMic(); showCalib("Can't start", error, true); return; }
   await sleep(500);
   S.calibrating = true; S.abortCalib = false;
   $("#calibMsg").style.display = "none"; $("#calibProgress").style.display = "block";
@@ -1203,7 +1357,7 @@ async function runCalibration() {
     const groups = new Set(samples.map(s => s.g));
     if (groups.size < Math.max(6, pts.length - 3)) {
       const diag = mode === "speech" ? ` Speech recogniser: ${speechSummary() || "no events at all"}.` : "";
-      showCalib("Not enough points", `Only ${groups.size} of ${pts.length} points were confirmed. Check that your face is lit and fully in the camera preview${mode === "speech" ? ", and that the word language matches how you're reading. If it never heard you, try “Voice detection” — it's instant and stays on the phone" : ""}.${diag}`, true);
+      showCalib("Not enough points", `Only ${groups.size} of ${pts.length} points were confirmed. Check that your face is lit and fully in the camera preview${mode === "speech" || mode === "local" ? ", and that the word language matches the words you're reading. Watch the waveform: if the bars don't move, the page isn't getting sound from the microphone" : ""}.${diag}`, true);
       S.calibrating = false; return;
     }
     $("#calibStep").textContent = "Fitting…"; await sleep(30);
@@ -1247,6 +1401,7 @@ async function runCalibration() {
     endCalibration(true);
   } finally {
     if (conf) conf.stop();
+    closeMic(); showHeard("");
     cdot.classList.remove("val");
   }
 }
@@ -1277,6 +1432,7 @@ async function driftFix() {
     }
   } finally {
     if (conf) conf.stop();
+    closeMic(); showHeard("");
     S.calibrating = false; S.abortCalib = false;
     $("#calib").classList.remove("show"); cdot.style.display = "none"; cword.className = ""; $("#moveChip").style.display = "none";
   }
@@ -1310,7 +1466,7 @@ $("#btnCsv").onclick = () => {
 addEventListener("keydown", e => {
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT" && e.target.type === "text") return;
   const k = e.key.toLowerCase();
-  if (k === "escape") { if (S.calibrating) { S.abortCalib = true; if (S.cancelWait) S.cancelWait(); } else $("#calib").classList.remove("show"); }
+  if (k === "escape") { if (S.calibrating) { S.abortCalib = true; if (S.cancelWait) S.cancelWait(); } else { cleanupPrep(); $("#calib").classList.remove("show"); } }
   else if (k === "c") openCalibration();
   else if (k === "d") driftFix();
   else if (k === "g") { $("#optDot").click(); }
@@ -1330,7 +1486,6 @@ addEventListener("resize", () => {
 
 setText(PASSAGES[0].title, PASSAGES[0].text);
 setMode("free");
-if (!SR) $("#optConfirm").value = "voice";
 if ((navigator.language || "").toLowerCase().startsWith("es")) $("#optLang").value = "es-ES";
 </script>
 </body>
