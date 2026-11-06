@@ -115,7 +115,10 @@
     .cell b{font-size:20px}
     .mobileOnly{display:list-item}
   }
-  #calibProgress{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);color:var(--muted);font-size:13px;display:none}
+  #calibProgress{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);color:var(--muted);font-size:13px;display:none;text-align:center;width:min(92vw,640px)}
+  #calibMic{display:none;color:#6c7389;margin-left:8px}
+  #calibMic.loud{color:var(--good)}
+  #calibHeard{margin-top:4px;min-height:1.2em;color:#aab0c0}
 </style>
 </head>
 <body>
@@ -243,7 +246,7 @@
   </div>
   <div id="cdot"></div>
   <div id="cword"></div>
-  <div id="calibProgress"></div>
+  <div id="calibProgress"><span id="calibStep"></span> <span id="calibMic" title="listening">● listening</span><div id="calibHeard"></div></div>
 </div>
 
 <script type="module">
@@ -878,42 +881,71 @@ function saidWord(transcript, word) {
 }
 
 // --- ways of confirming that you looked at the word ---
+// Each confirmer has begin(word, timeout) -> { ready, done, reveal() }.
+//   ready:  resolves once it can actually hear/see a confirmation (the word is only shown after this)
+//   reveal: called the moment the word appears on screen
+//   done:   resolves with { t } on confirmation, null on timeout, { error } on a fatal problem
+const FATAL_SPEECH = ["not-allowed", "service-not-allowed", "language-not-supported", "audio-capture"];
+const speechLog = {};   // counts of recogniser events, reported if calibration fails
+const logSpeech = k => { speechLog[k] = (speechLog[k] || 0) + 1; };
+const speechSummary = () => Object.entries(speechLog).map(([k, v]) => `${k} ×${v}`).join(", ");
 function makeSpeechConfirmer(lang) {
-  const rec = new SR();
-  rec.lang = lang; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 5;
-  let active = true, waiting = null, fatal = null;
-  rec.onresult = e => {
-    if (!waiting) return;
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const r = e.results[i];
-      for (let a = 0; a < r.length; a++) if (saidWord(r[a].transcript, waiting.word)) { const w = waiting; waiting = null; w.resolve({ t: performance.now() }); return; }
-    }
-  };
-  rec.onerror = e => {
-    if (["not-allowed", "service-not-allowed", "language-not-supported", "audio-capture"].includes(e.error)) {
-      fatal = e.error; if (waiting) { const w = waiting; waiting = null; w.resolve({ error: e.error }); }
-    }
-  };
-  rec.onend = () => { if (active && !fatal) { try { rec.start(); } catch (_) { } } };
-  return {
+  let localOK = false;
+  const api = {
     where: "Google's servers",
     async init() {
       try {
-        if ("processLocally" in rec && SR.available) {
+        const probe = new SR();
+        if ("processLocally" in probe && SR.available) {
           const st = await SR.available({ langs: [lang], processLocally: true });
-          if (st === "available") { rec.processLocally = true; this.where = "this device"; }
+          if (st === "available") { localOK = true; api.where = "this device"; }
         }
       } catch (_) { }
-      rec.start();
     },
-    waitFor(word, timeout) {
-      return new Promise(res => {
-        waiting = { word, resolve: res };
-        setTimeout(() => { if (waiting && waiting.resolve === res) { waiting = null; res(null); } }, timeout);
-      });
+    // One short recognition session per word: this is what works reliably on Android, where
+    // "continuous" sessions are ignored and end on their own.
+    begin(word, timeout) {
+      let readyRes, doneRes, finished = false, revealed = false, to;
+      const ready = new Promise(r => readyRes = r), done = new Promise(r => doneRes = r);
+      let rec = null, restarts = 0;
+      const finish = v => {
+        if (finished) return; finished = true; clearTimeout(to); readyRes();
+        if (rec) { rec.onend = null; try { rec.abort(); } catch (_) { } }
+        setListening(false); doneRes(v);
+      };
+      // Android ends sessions on its own and sometimes refuses an immediate restart,
+      // so each restart uses a fresh recogniser after a short pause.
+      const open = () => {
+        if (finished) return;
+        rec = new SR();
+        rec.lang = lang; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 5;
+        if (localOK) rec.processLocally = true;
+        wire(rec);
+        try { rec.start(); logSpeech("start"); }
+        catch (e) { logSpeech("start-failed"); if (++restarts < 6) setTimeout(open, 250); else finish({ error: "start-failed" }); }
+      };
+      const wire = rec => {
+      rec.onaudiostart = () => { logSpeech("listening"); setListening(true); readyRes(); };
+      rec.onstart = () => setTimeout(readyRes, 300);
+      rec.onresult = e => {
+        logSpeech("result");
+        let txt = "";
+        for (let i = 0; i < e.results.length; i++) {
+          const r = e.results[i]; txt += r[0].transcript + " ";
+          if (revealed) for (let a = 0; a < r.length; a++) if (saidWord(r[a].transcript, word)) { showHeard(txt.trim(), true); return finish({ t: performance.now() }); }
+        }
+        showHeard(txt.trim(), false);
+      };
+      rec.onerror = e => { logSpeech(e.error || "error"); if (FATAL_SPEECH.includes(e.error)) finish({ error: e.error }); };
+      rec.onend = () => { setListening(false); if (!finished) setTimeout(open, 120); }; // keep listening until confirmed or timed out
+      };
+      open();
+      setTimeout(readyRes, 2500); // don't wait forever for the mic
+      return { ready, done, reveal() { revealed = true; to = setTimeout(() => finish(null), timeout); }, cancel() { finish(null); } };
     },
-    stop() { active = false; try { rec.abort(); } catch (_) { } },
+    stop() { setListening(false); },
   };
+  return api;
 }
 function makeVoiceConfirmer() {
   // Local voice-activity detection: only the timing of your voice is used, nothing is recorded or sent.
@@ -928,41 +960,48 @@ function makeVoiceConfirmer() {
       if (ctx.state === "suspended") await ctx.resume();
       timer = setInterval(() => {
         an.getFloatTimeDomainData(buf);
-        let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
-        const rms = Math.sqrt(s / buf.length);
+        let sq = 0; for (let i = 0; i < buf.length; i++) sq += buf[i] * buf[i];
+        const rms = Math.sqrt(sq / buf.length);
         const loud = rms > Math.max(0.012, floor * 4);
         if (loud) { loudRun++; quietRun = 0; } else { loudRun = 0; quietRun++; floor += 0.05 * (rms - floor); }
-        if (!waiting) return;
-        if (!waiting.armed && quietRun >= 8) waiting.armed = true;           // you were silent after the word appeared
-        if (waiting.armed && loudRun >= 4 && performance.now() - waiting.t0 > 300) { // ~80 ms of voice
-          const w = waiting; waiting = null; w.resolve({ t: performance.now() - 80 });
+        setListening(true, loud);
+        if (!waiting || !waiting.t0) return;
+        if (!waiting.armed && quietRun >= 6) waiting.armed = true;             // silent once the word appeared
+        if (waiting.armed && loudRun >= 3 && performance.now() - waiting.t0 > 250) { // ~60 ms of voice
+          const w = waiting; waiting = null; w.res({ t: performance.now() - 60 });
         }
       }, 20);
     },
-    waitFor(word, timeout) {
-      return new Promise(res => {
-        waiting = { resolve: res, armed: false, t0: performance.now() };
-        setTimeout(() => { if (waiting && waiting.resolve === res) { waiting = null; res(null); } }, timeout);
-      });
+    begin(word, timeout) {
+      let res; const done = new Promise(r => res = r);
+      const me = { res, armed: false, t0: 0 }; waiting = me;
+      return {
+        ready: Promise.resolve(), done,
+        reveal() { me.t0 = performance.now(); setTimeout(() => { if (waiting === me) { waiting = null; res(null); } }, timeout); },
+        cancel() { if (waiting === me) { waiting = null; res(null); } },
+      };
     },
-    stop() { clearInterval(timer); if (stream) stream.getTracks().forEach(t => t.stop()); try { ctx.close(); } catch (_) { } },
+    stop() { clearInterval(timer); setListening(false); if (stream) stream.getTracks().forEach(t => t.stop()); try { ctx.close(); } catch (_) { } },
   };
 }
 function makeTapConfirmer() {
   let waiting = null;
   const h = e => {
-    if (!waiting) return;
+    if (!waiting || !waiting.t0) return;
     if (e.type === "keydown" && e.code !== "Space" && e.key !== " ") return;
-    e.preventDefault(); const w = waiting; waiting = null; w.resolve({ t: performance.now() });
+    e.preventDefault(); const w = waiting; waiting = null; w.res({ t: performance.now() });
   };
   return {
     where: "",
     async init() { addEventListener("keydown", h, true); $("#calib").addEventListener("pointerdown", h); },
-    waitFor(word, timeout) {
-      return new Promise(res => {
-        waiting = { resolve: res };
-        setTimeout(() => { if (waiting && waiting.resolve === res) { waiting = null; res(null); } }, timeout);
-      });
+    begin(word, timeout) {
+      let res; const done = new Promise(r => res = r);
+      const me = { res, t0: 0 }; waiting = me;
+      return {
+        ready: Promise.resolve(), done,
+        reveal() { me.t0 = performance.now(); setTimeout(() => { if (waiting === me) { waiting = null; res(null); } }, timeout); },
+        cancel() { if (waiting === me) { waiting = null; res(null); } },
+      };
     },
     stop() { removeEventListener("keydown", h, true); $("#calib").removeEventListener("pointerdown", h); },
   };
@@ -972,6 +1011,15 @@ function makeConfirmer(mode, lang) {
   if (mode === "voice") return makeVoiceConfirmer();
   if (mode === "tap") return makeTapConfirmer();
   return null;
+}
+// live feedback under the target
+function showHeard(txt, ok) {
+  const el = $("#calibHeard"); if (!el) return;
+  el.textContent = txt ? `heard: “${txt}”` : ""; el.style.color = ok ? "var(--good)" : "";
+}
+function setListening(on, loud) {
+  const el = $("#calibMic"); if (!el) return;
+  el.style.display = on ? "inline-block" : "none"; el.classList.toggle("loud", !!loud);
 }
 
 function calibPoints(n) {
@@ -986,16 +1034,14 @@ function calibPoints(n) {
 }
 const cdot = $("#cdot"), cword = $("#cword");
 function moveDot(x, y) { cdot.style.transform = `translate(${x}px,${y}px)`; }
-function abortable(p) { return Promise.race([p, new Promise(r => { S.cancelWait = () => r(null); })]); }
 
 // Show one target and return the gaze features recorded while you were (confirmed to be) looking at it.
 async function presentTarget(tx, ty, mode, conf, nextWord) {
-  cword.className = ""; cdot.className = ""; cdot.style.display = "block";
+  cword.className = ""; cdot.className = ""; cdot.style.display = "block"; showHeard("");
   moveDot(tx, ty);
-  await sleep(450);
-  if (S.abortCalib) return null;
   if (mode === "dots") {
-    await sleep(300);
+    await sleep(700);
+    if (S.abortCalib) return null;
     S.collecting = [];
     cdot.classList.add("collect");
     await sleep(1000);
@@ -1003,21 +1049,25 @@ async function presentTarget(tx, ty, mode, conf, nextWord) {
     return got.map(s => s.f);
   }
   const word = nextWord();
+  const h = conf.begin(word, 6000);              // start listening while the dot is still travelling
+  S.cancelWait = () => h.cancel();
+  await Promise.all([sleep(380), h.ready]);      // the word appears only once the mic is live
+  if (S.abortCalib) { h.cancel(); return null; }
   cword.textContent = word;
   cword.style.transform = `translate(${tx}px,${ty}px) translate(-50%,-50%)`;
   cdot.style.display = "none"; cword.className = "show";
   const tShow = performance.now();
   S.collecting = [];
-  const r = await abortable(conf.waitFor(word, 8000));
-  let all = S.collecting;
+  h.reveal();
+  const r = await h.done;
   if (!r || r.error) { S.collecting = null; cword.className = ""; return r && r.error ? { error: r.error } : null; }
-  let tEnd = mode === "speech" ? r.t : r.t + 250;          // with voice/tap, the eyes stay on the word while you say it
-  tEnd = Math.max(tEnd, tShow + 1350);                     // and the word stays until there's ~1 s of gaze data
+  let tEnd = mode === "speech" ? r.t : r.t + 200;          // with voice/tap the eyes stay on the word while you say it
+  tEnd = Math.max(tEnd, tShow + 1000);                     // keep the word up until there's enough gaze data
   const wait = tEnd - performance.now(); if (wait > 0) await sleep(wait);
   cword.className = "show ok";
-  all = S.collecting; S.collecting = null;
-  await sleep(180); cword.className = "";
-  const lo = Math.max(tShow + 350, tEnd - 1500);
+  const all = S.collecting; S.collecting = null;
+  await sleep(120); cword.className = "";
+  const lo = Math.max(tShow + 300, tEnd - 1500);
   return all.filter(s => s.t >= lo && s.t <= tEnd).map(s => s.f);
 }
 
@@ -1108,16 +1158,17 @@ async function runCalibration() {
   const VW = innerWidth, VH = innerHeight;
   const pts = calibPoints(+$("#optPts").value);
   const nextWord = wordSource();
+  for (const k in speechLog) delete speechLog[k];
   const samples = [];
   let fatal = null;
   try {
     for (let i = 0; i < pts.length && !S.abortCalib && !fatal; i++) {
       const tx = pts[i][0] * VW, ty = pts[i][1] * VH;
-      $("#calibProgress").textContent = `Point ${i + 1} of ${pts.length}${hint}`;
+      $("#calibStep").textContent = `Point ${i + 1} of ${pts.length}${hint}`;
       let fs = await presentTarget(tx, ty, mode, conf, nextWord);
       if (fs && fs.error) { fatal = fs.error; break; }
       if (!S.abortCalib && (!fs || fs.length < 6)) {                 // missed: one more try with a new word
-        $("#calibProgress").textContent = `Point ${i + 1} of ${pts.length} — once more${hint}`;
+        $("#calibStep").textContent = `Point ${i + 1} of ${pts.length} — once more${hint}`;
         fs = await presentTarget(tx, ty, mode, conf, nextWord);
         if (fs && fs.error) { fatal = fs.error; break; }
       }
@@ -1127,10 +1178,11 @@ async function runCalibration() {
     if (S.abortCalib) return endCalibration(false);
     const groups = new Set(samples.map(s => s.g));
     if (groups.size < Math.max(6, pts.length - 3)) {
-      showCalib("Not enough points", `Only ${groups.size} of ${pts.length} points were confirmed. Check that your face is lit and fully in the camera preview${mode === "speech" ? ", and that the word language matches how you're reading" : ""}, then try again.`, true);
+      const diag = mode === "speech" ? ` Speech recogniser: ${speechSummary() || "no events at all"}.` : "";
+      showCalib("Not enough points", `Only ${groups.size} of ${pts.length} points were confirmed. Check that your face is lit and fully in the camera preview${mode === "speech" ? ", and that the word language matches how you're reading. If it never heard you, try “Voice detection” — it's instant and stays on the phone" : ""}.${diag}`, true);
       S.calibrating = false; return;
     }
-    $("#calibProgress").textContent = "Fitting…"; await sleep(30);
+    $("#calibStep").textContent = "Fitting…"; await sleep(30);
     const fit = robustTrain(samples, pts.length);
     S.model = fit.model; S.bias = [0, 0];
 
@@ -1139,7 +1191,7 @@ async function runCalibration() {
     const res = [];
     for (let i = 0; i < vpts.length && !S.abortCalib && !fatal; i++) {
       const tx = vpts[i][0] * VW, ty = vpts[i][1] * VH;
-      $("#calibProgress").textContent = `Checking accuracy ${i + 1} of ${vpts.length}${hint}`;
+      $("#calibStep").textContent = `Checking accuracy ${i + 1} of ${vpts.length}${hint}`;
       cdot.classList.add("val");
       const fs = await presentTarget(tx, ty, mode, conf, nextWord);
       if (fs && fs.error) { fatal = fs.error; break; }
@@ -1187,7 +1239,7 @@ async function driftFix() {
   const started = startConfirmer(mode);
   S.calibrating = true; S.abortCalib = false;
   $("#calib").classList.add("show"); $("#calibMsg").style.display = "none";
-  $("#calibProgress").style.display = "block"; $("#calibProgress").textContent = "Drift fix: look at the dot";
+  $("#calibProgress").style.display = "block"; $("#calibStep").textContent = "Drift fix: look at the dot";
   const { conf, error } = await started;
   try {
     if (!error) {
